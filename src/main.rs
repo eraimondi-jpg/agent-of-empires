@@ -210,6 +210,8 @@ async fn main() -> Result<()> {
         #[cfg(feature = "serve")]
         Some(Commands::Serve(args)) => cli::serve::run(&profile, args).await,
         #[cfg(feature = "serve")]
+        Some(Commands::Url(args)) => cli::url::run(args),
+        #[cfg(feature = "serve")]
         Some(Commands::Cockpit { command }) => cli::cockpit::run(command).await,
         None => {
             // Fold the drift notice into the existing startup-warning channel
