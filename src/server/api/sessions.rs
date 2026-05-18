@@ -1017,6 +1017,7 @@ pub async fn create_session(
                     instance.project_path.clone(),
                     instance.cockpit_acp_session_id.clone(),
                     instance.source_profile.clone(),
+                    instance.yolo_mode,
                 ))
             } else {
                 None
@@ -1034,6 +1035,7 @@ pub async fn create_session(
                 project_path,
                 stored_acp_session_id,
                 source_profile,
+                yolo_mode,
             )) = cockpit_spawn_target
             {
                 let agent = state
@@ -1083,6 +1085,7 @@ pub async fn create_session(
                             stored_acp_session_id,
                             sandbox_info,
                             source_profile: source_profile_for_spawn,
+                            yolo_mode,
                         })
                         .await
                     {
