@@ -28,21 +28,51 @@ use crate::tui::settings::{SettingsAction, SettingsView};
 /// fast for trackpads or too slow on remote sessions.
 const DOUBLE_CLICK_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(400);
 
+/// xterm bracketed-paste start sequence: `ESC [ 2 0 0 ~`. An agent that
+/// has enabled bracketed paste mode (`\e[?2004h`) treats everything
+/// between this marker and the matching end marker as one paste rather
+/// than as keystrokes, so interior newlines accumulate in the input
+/// buffer instead of firing `submit` per line.
+const BRACKETED_PASTE_START: &[u8] = &[0x1b, b'[', b'2', b'0', b'0', b'~'];
+
+/// xterm bracketed-paste end sequence: `ESC [ 2 0 1 ~`. Pairs with
+/// [`BRACKETED_PASTE_START`].
+const BRACKETED_PASTE_END: &[u8] = &[0x1b, b'[', b'2', b'0', b'1', b'~'];
+
 /// Decompose pasted text into a series of `TmuxKey`s safe for the
-/// live-send worker to dispatch. Control bytes can't ride inside a
-/// `send-keys -l` payload (tmux's command parser splits on newlines
-/// and we have no safe encoding for raw control bytes), so we split
-/// the paste around them: printable runs go through as `Literal`,
-/// known control characters translate to their named equivalents
-/// (`\n` and `\r` → `Enter`, `\t` → `Tab`), and anything else below
-/// 0x20 is dropped rather than mapped to a surprising named key. A
-/// `\r\n` pair coalesces to a single `Enter` so Windows-line-ending
-/// pastes don't fire two newlines in a row.
+/// live-send worker to dispatch.
+///
+/// Single-line pastes (no `\n` / `\r`) skip the bracketed-paste
+/// wrapping and travel as a single `Literal`: a bare shell or any
+/// agent that hasn't enabled `\e[?2004h` keeps working unchanged,
+/// because we never emit the escape markers it would render as
+/// literal text. Tabs in single-line pastes still go through as
+/// `Named("Tab")` to mirror the historical path.
+///
+/// Multi-line pastes get wrapped in xterm bracketed-paste markers
+/// (`\e[200~` / `\e[201~`) so the receiving agent sees the entire
+/// payload as one paste rather than as N independent Enter keypresses.
+/// Without the wrapping, agents that submit on Enter (Claude Code,
+/// Codex, OpenCode, ...) post one user message per pasted line, which
+/// is the bug behind #1546. The whole payload (markers, printable
+/// runs, interior CRs, and tabs) goes through as a single `HexBytes`,
+/// so the worker fires one `tmux send-keys -H` subprocess per paste
+/// instead of one per chunk. `\r\n` pairs coalesce to a single CR so
+/// Windows-line-ending pastes don't double up; other control bytes
+/// (BEL, ESC, ...) are dropped rather than risk that an embedded
+/// escape closes the bracketed-paste sequence on the agent's side.
 pub(super) fn split_paste_for_live_send(text: &str) -> Vec<live_send::TmuxKey> {
+    let has_newline = text.contains('\n') || text.contains('\r');
+    if !has_newline {
+        return split_inline_paste(text);
+    }
+    split_bracketed_paste(text)
+}
+
+fn split_inline_paste(text: &str) -> Vec<live_send::TmuxKey> {
     let mut out = Vec::new();
     let mut buf = String::new();
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
+    for ch in text.chars() {
         let is_control = (ch as u32) < 0x20 || ch == '\x7f';
         if !is_control {
             buf.push(ch);
@@ -51,25 +81,53 @@ pub(super) fn split_paste_for_live_send(text: &str) -> Vec<live_send::TmuxKey> {
         if !buf.is_empty() {
             out.push(live_send::TmuxKey::Literal(std::mem::take(&mut buf)));
         }
-        match ch {
-            '\n' => out.push(live_send::TmuxKey::Named("Enter".to_string())),
-            '\r' => {
-                if chars.peek() == Some(&'\n') {
-                    chars.next();
-                }
-                out.push(live_send::TmuxKey::Named("Enter".to_string()));
-            }
-            '\t' => out.push(live_send::TmuxKey::Named("Tab".to_string())),
-            _ => {
-                // BEL, ESC, etc.: dropping is friendlier than mapping
-                // to a named key that could cancel the agent's input.
-            }
+        if ch == '\t' {
+            out.push(live_send::TmuxKey::Named("Tab".to_string()));
         }
+        // BEL, ESC, etc.: dropping is friendlier than mapping
+        // to a named key that could cancel the agent's input.
     }
     if !buf.is_empty() {
         out.push(live_send::TmuxKey::Literal(buf));
     }
     out
+}
+
+fn split_bracketed_paste(text: &str) -> Vec<live_send::TmuxKey> {
+    // Build one contiguous byte payload: start marker, then the paste
+    // content with printables as their UTF-8 bytes / interior newlines
+    // as CR (0x0d) / tabs as 0x09, then the end marker. Sending it as
+    // one `HexBytes` means the worker fires exactly one `tmux send-keys
+    // -H` subprocess per paste rather than one per chunk.
+    let mut bytes = Vec::with_capacity(text.len() + BRACKETED_PASTE_START.len() * 2);
+    bytes.extend_from_slice(BRACKETED_PASTE_START);
+
+    let mut chars = text.chars().peekable();
+    let mut utf8_buf = [0u8; 4];
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\n' => bytes.push(0x0d),
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                bytes.push(0x0d);
+            }
+            '\t' => bytes.push(0x09),
+            c if (c as u32) < 0x20 || c == '\x7f' => {
+                // Embedded ESC / BEL / etc. has no safe encoding
+                // inside the paste payload; drop rather than risk a
+                // bogus terminal escape closing the paste early.
+            }
+            c => {
+                let s = c.encode_utf8(&mut utf8_buf);
+                bytes.extend_from_slice(s.as_bytes());
+            }
+        }
+    }
+
+    bytes.extend_from_slice(BRACKETED_PASTE_END);
+    vec![live_send::TmuxKey::HexBytes(bytes)]
 }
 
 fn resolve_hook_install_agent(
