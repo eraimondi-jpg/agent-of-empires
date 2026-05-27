@@ -1993,11 +1993,15 @@ impl HomeView {
         // the live edge) sits between the title and the exit chord
         // hint so it gets noticed when there's something to notice.
         if let Some(state) = &self.live_send {
-            let raw_title = if state.title.is_empty() {
+            let base_title = if state.title.is_empty() {
                 "session"
             } else {
                 state.title.as_str()
             };
+            // Surface which pane keystrokes are landing on; the shared
+            // formatter keeps this label in lockstep with the compose
+            // dialog's title.
+            let raw_title = live_send::format_target_label(base_title, state.target);
             let chip = " \u{25CF} LIVE \u{2192} ";
             // The chord display is built from the user's configured
             // exit-chord list so the hint always shows what actually
@@ -2035,7 +2039,7 @@ impl HomeView {
                 + unicode_width::UnicodeWidthStr::width(suffix)
                 + unicode_width::UnicodeWidthStr::width(scroll.as_str());
             let title_budget = (area.width as usize).saturating_sub(fixed_width);
-            let title = truncate_to_width(raw_title, title_budget);
+            let title = truncate_to_width(&raw_title, title_budget);
             let mut spans: Vec<Span<'static>> = vec![
                 Span::styled(
                     chip,
