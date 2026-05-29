@@ -33,7 +33,7 @@ The wizard greys out the cockpit option for tools not in this set.
 
 | aoe tool   | Substrate B (cockpit)                                      | Auth                                   |
 |------------|------------------------------------------------------------|----------------------------------------|
-| `claude`   | `claude-agent-acp` (Zed adapter for the Claude SDK, requires >=0.38.0) | `claude /login` writes `~/.claude/credentials`; or `ANTHROPIC_API_KEY` |
+| `claude`   | `claude-agent-acp` (Zed adapter for the Claude SDK, requires >=0.39.0) | `claude /login` writes `~/.claude/credentials`; or `ANTHROPIC_API_KEY` |
 | `opencode` | `opencode acp` (native, SST)                               | `OPENCODE_API_KEY` env var; or provider-specific env (set up via `opencode auth`) |
 | `gemini`   | `gemini --acp` (native, Google)                            | `GEMINI_API_KEY` env var, OAuth via `gemini auth`, or Vertex `GOOGLE_API_KEY` |
 | `codex`    | `codex-acp` (Zed adapter, npm `@zed-industries/codex-acp`) | `OPENAI_API_KEY` env var, or ChatGPT login (local-only) |
@@ -540,7 +540,7 @@ its cached list in full.
 ### When the pickers appear
 
 The pickers only render if the adapter publishes the matching
-category. `claude-agent-acp` v0.38.0+ advertises a model selector
+category. `claude-agent-acp` v0.39.0+ advertises a model selector
 for every session, and adds a reasoning-effort selector when the
 current model reports `supportsEffort=true`. Older adapters that
 emit no `config_option_update` show neither picker; this is by
@@ -693,7 +693,7 @@ manager (e.g., `brew reinstall aoe`).
 
 ### `aoe cockpit doctor` says claude-code adapter is missing
 
-Install the official adapter once. aoe requires v0.37.0 or newer; the
+Install the official adapter once. aoe requires v0.39.0 or newer; the
 cockpit refuses to enter a session with an older adapter and surfaces a
 dedicated remediation screen with the exact install command:
 
@@ -705,9 +705,10 @@ Then run `claude login` if you haven't already.
 
 The minimum version is enforced at the ACP `initialize` handshake; the
 check reads `agent_info.version` from the adapter's initialize response
-and rejects anything below 0.37.0 with a structured `StartupError`
-event. Newer versions are accepted. The minimum exists because aoe
-relies on behavior that only landed in v0.37.0:
+and rejects anything below 0.39.0 with a structured `StartupError`
+event. Newer versions are accepted. The floor tracks the newest
+behavior aoe depends on; the earliest hard requirements landed in
+v0.37.0:
 
 - `memory_recall` tool calls (upstream
   agentclientprotocol/claude-agent-acp#703), so session-start memory
@@ -719,7 +720,7 @@ relies on behavior that only landed in v0.37.0:
   `end_turn`.
 
 If you have an older version pinned by an internal mirror, set up the
-mirror to ship 0.37.0 or override the global install with
+mirror to ship 0.39.0 or override the global install with
 `npm install -g @agentclientprotocol/claude-agent-acp@latest` before
 starting `aoe serve`.
 
