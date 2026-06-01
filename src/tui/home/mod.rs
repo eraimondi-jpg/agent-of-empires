@@ -272,6 +272,38 @@ impl PreviewCache {
             ));
         }
     }
+
+    /// Store a fresh capture, invalidating the parsed cache and stamping
+    /// the session/dimensions/time the content belongs to. Returns the
+    /// captured line count so the caller can clamp scroll. Shared by the
+    /// synchronous fork path (`refresh_preview_cache_core`) and the
+    /// off-thread worker path so the two can't drift.
+    pub(super) fn store_capture(
+        &mut self,
+        content: String,
+        session_id: String,
+        dimensions: (u16, u16),
+    ) -> usize {
+        self.captured_lines = content.lines().count();
+        self.content = content;
+        // Invalidate the cached parse; the next `ensure_parsed` re-runs
+        // `ansi-to-tui`.
+        self.parsed_text = None;
+        self.session_id = Some(session_id);
+        self.dimensions = dimensions;
+        self.last_refresh = Instant::now();
+        self.captured_lines
+    }
+}
+
+/// Per-frame durations for the preview pipeline's two fork/CPU phases.
+/// Lives on `HomeView`, reset each frame by `App::render`, and read back
+/// by the render sampler so a slow or live-send frame logs the breakdown
+/// instead of a single opaque `frame_ms`.
+#[derive(Default, Clone, Copy)]
+pub(super) struct PreviewTimings {
+    pub(super) capture: std::time::Duration,
+    pub(super) parse: std::time::Duration,
 }
 
 pub(super) const INDENTS: [&str; 10] = [
@@ -429,6 +461,12 @@ pub struct HomeView {
     /// latency. Dropping (set to None when live mode exits) closes the
     /// channel and the worker thread exits cleanly on its own.
     pub(super) live_send_worker: Option<live_send::LiveSendWorker>,
+    /// Background capture worker for agent live-send. Forks `tmux
+    /// capture-pane` on its own thread so the render loop applies fresh
+    /// preview content without forking (the per-frame capture was ~90% of
+    /// a live-send frame). `Some` only while live-send targets the agent
+    /// pane; `None` otherwise, where the synchronous capture path runs.
+    pub(super) live_capture_worker: Option<live_send::LiveCaptureWorker>,
     /// Last (cols, rows) we asked the worker to resize the pane to in
     /// the current live-send session. Used to dedup the resize messages
     /// fired from the preview refresh path; cleared on live-send exit.
@@ -505,6 +543,15 @@ pub struct HomeView {
     pub(super) terminal_preview_cache: PreviewCache,
     pub(super) container_terminal_preview_cache: PreviewCache,
     pub(super) tool_preview_cache: PreviewCache,
+
+    /// Per-frame timing of the preview pipeline's two latency-sensitive
+    /// phases, reset by `App::render` before each `render` and populated
+    /// at the agent-preview call site. `capture` is the `tmux
+    /// capture-pane` fork (sub-100us when the gate short-circuits, ~1-10ms
+    /// when it actually forks); `parse` is the `ansi-to-tui` pass (~0 on a
+    /// parsed-cache hit). The app loop's render sampler reads these to
+    /// break a live-send frame down into fork vs. parse vs. widget build.
+    pub(super) preview_timings: PreviewTimings,
 
     /// Mouse wheel offset for the preview pane, in lines back from the bottom.
     /// Reset to 0 whenever the selected session changes.
@@ -822,6 +869,7 @@ impl HomeView {
             pending_live_send_target: live_send::LiveSendTarget::Agent,
             live_send: None,
             live_send_worker: None,
+            live_capture_worker: None,
             live_send_last_resize: None,
             live_send_pending_leader: false,
             sidebar_collapsed: false,
@@ -846,6 +894,7 @@ impl HomeView {
             creating_hook_progress: HashMap::new(),
             creating_stub_id: None,
             preview_cache: PreviewCache::default(),
+            preview_timings: PreviewTimings::default(),
             terminal_preview_cache: PreviewCache::default(),
             container_terminal_preview_cache: PreviewCache::default(),
             tool_preview_cache: PreviewCache::default(),
@@ -2898,6 +2947,16 @@ impl HomeView {
             // Drop worker first so its queued resizes (if any) drain
             // against the old session before we reset its sizing.
             self.live_send_worker = None;
+            // Stop the old session's capture worker too; a fresh one
+            // (if the new target is the agent) is spawned below.
+            self.live_capture_worker = None;
+            // Drop the previous session's cached preview so the first
+            // frames after the switch don't paint session A's content
+            // under session B's header while B's capture worker spins up.
+            // (The synchronous path got this for free via its cross-session
+            // kill-switch branch; the worker path applies content lazily,
+            // so clear it explicitly here.)
+            self.preview_cache = PreviewCache::default();
             if let Some(name) = &prev_tmux_name {
                 crate::tmux::Session::from_name(name).reset_size_to_latest_client();
             }
@@ -2942,7 +3001,19 @@ impl HomeView {
         // pre-#1485 path; control-mode was tried as an optimization
         // but turned out to be unreliable on real-world tmux setups
         // and was removed in favor of this simpler model).
-        self.live_send_worker = Some(live_send::LiveSendWorker::spawn(tmux_name));
+        self.live_send_worker = Some(live_send::LiveSendWorker::spawn(tmux_name.clone()));
+        // Spawn the off-thread preview capture only for the agent target:
+        // it's the one preview that force-refreshes every frame in
+        // live-send, so it's the only path paying the per-frame
+        // capture-pane fork. `tmux_name` is the agent session here.
+        self.live_capture_worker = match target {
+            live_send::LiveSendTarget::Agent => {
+                Some(live_send::LiveCaptureWorker::spawn(tmux_name))
+            }
+            live_send::LiveSendTarget::Terminal | live_send::LiveSendTarget::ContainerTerminal => {
+                None
+            }
+        };
         // Start every live-mode entry (including a switch from another
         // session) with a disarmed leader menu, so a half-entered chord
         // can't carry over from a prior target.
