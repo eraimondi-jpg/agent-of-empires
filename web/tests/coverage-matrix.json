@@ -889,6 +889,20 @@
       ]
     },
     {
+      "id": "right-panel.diff-copy-path",
+      "kind": "vitest",
+      "risk": "low",
+      "specs": [
+        "src/components/diff/__tests__/CopyPathContextMenu.test.tsx",
+        "src/components/diff/__tests__/DiffFileList.copyPath.test.tsx"
+      ],
+      "components": [
+        "web/src/components/diff/CopyPathContextMenu.tsx",
+        "web/src/components/diff/DiffFileList.tsx",
+        "web/src/lib/clipboard.ts"
+      ]
+    },
+    {
       "id": "right-panel.diff",
       "kind": "live-playwright",
       "risk": "medium",
