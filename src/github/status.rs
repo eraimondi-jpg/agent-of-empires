@@ -43,13 +43,14 @@ pub enum CiState {
 
 /// Aggregate a head commit's check runs into a [`CiAggregate`].
 ///
-/// Pure and total. Conclusion semantics follow GitHub's: `success`,
-/// `neutral`, and `skipped` count as passing (a skipped required check is
-/// not a failure); `failure`, `cancelled`, `timed_out`, and
-/// `action_required` count as failing; anything not yet `completed` (and a
-/// completed run with no/unknown conclusion) counts as pending. The overall
-/// `state` is Failing if any run fails, else Pending if any is in flight,
-/// else Passing, else None when there are no runs at all.
+/// Pure and total. Conclusion semantics follow GitHub's documented set:
+/// `success`, `neutral`, and `skipped` count as passing (a skipped required
+/// check is not a failure); `failure`, `cancelled`, `timed_out`,
+/// `action_required`, `stale`, and `startup_failure` count as failing;
+/// anything not yet `completed` (and a completed run with no/unrecognized
+/// conclusion) counts as pending. The overall `state` is Failing if any run
+/// fails, else Pending if any is in flight, else Passing, else None when
+/// there are no runs at all.
 pub fn aggregate_check_runs(runs: &[CheckRun]) -> CiAggregate {
     let mut passing = 0u64;
     let mut failing = 0u64;
@@ -62,9 +63,12 @@ pub fn aggregate_check_runs(runs: &[CheckRun]) -> CiAggregate {
         }
         match run.conclusion.as_deref() {
             Some("success") | Some("neutral") | Some("skipped") => passing += 1,
-            Some("failure") | Some("cancelled") | Some("timed_out") | Some("action_required") => {
-                failing += 1
-            }
+            Some("failure")
+            | Some("cancelled")
+            | Some("timed_out")
+            | Some("action_required")
+            | Some("stale")
+            | Some("startup_failure") => failing += 1,
             _ => pending += 1,
         }
     }
@@ -286,10 +290,20 @@ mod tests {
 
     #[test]
     fn completed_with_unknown_conclusion_is_pending() {
-        let runs = vec![run("completed", None), run("completed", Some("stale"))];
+        // Truly unrecognized / missing conclusions stay pending.
+        let runs = vec![run("completed", None), run("completed", Some("mystery"))];
         let agg = aggregate_check_runs(&runs);
         assert_eq!(agg.pending, 2);
         assert_eq!(agg.state, CiState::Pending);
+    }
+
+    #[test]
+    fn stale_and_startup_failure_are_failing() {
+        for conclusion in ["stale", "startup_failure"] {
+            let agg = aggregate_check_runs(&[run("completed", Some(conclusion))]);
+            assert_eq!(agg.failing, 1, "{conclusion} should count as failing");
+            assert_eq!(agg.state, CiState::Failing, "{conclusion} -> Failing");
+        }
     }
 
     #[test]
