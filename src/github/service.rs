@@ -107,7 +107,9 @@ fn build_client(token: Option<&str>) -> Option<GitHubClient> {
 }
 
 enum RefreshOutcome {
-    Status(PrStatus),
+    /// Boxed: `PrStatus` is much larger than the other variants, so keeping
+    /// it inline would bloat every `RefreshOutcome` (clippy large_enum_variant).
+    Status(Box<PrStatus>),
     /// Rate limited; park for this long before the next tick.
     RateLimited(Duration),
     /// Transient per-PR failure; skip this PR this tick.
@@ -152,13 +154,13 @@ async fn refresh_pr(client: &GitHubClient, key: &PrKey) -> RefreshOutcome {
         }
     };
 
-    RefreshOutcome::Status(PrStatus::from_parts(
+    RefreshOutcome::Status(Box::new(PrStatus::from_parts(
         key.owner.clone(),
         key.repo.clone(),
         details,
         runs,
         Utc::now(),
-    ))
+    )))
 }
 
 /// Diff-write the tracked PR set onto the in-memory instance and storage.
@@ -266,7 +268,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
         let mut rate_limit_park: Option<Duration> = None;
         for key in &desired {
             match refresh_pr(&client, key).await {
-                RefreshOutcome::Status(s) => fetched.push(s),
+                RefreshOutcome::Status(s) => fetched.push(*s),
                 RefreshOutcome::RateLimited(park) => {
                     rate_limit_park = Some(park);
                     break;
