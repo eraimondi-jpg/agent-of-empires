@@ -23,8 +23,11 @@ pub struct RepoGithubContext {
     /// The session's working branch in this repo.
     pub branch: String,
     /// Open PR numbers whose head is `{owner}:{branch}`, ascending and
-    /// de-duplicated. Empty when none are open or discovery failed.
-    pub open_prs: Vec<u64>,
+    /// de-duplicated. `Some(vec![])` means discovery succeeded and found
+    /// none; `None` means the discovery request failed (network, auth, rate
+    /// limit). The distinction matters: callers must not treat a failed
+    /// fetch as "no PRs" and wipe previously tracked state.
+    pub open_prs: Option<Vec<u64>>,
 }
 
 /// One repo to resolve, derived purely from the session model.
@@ -94,7 +97,7 @@ pub async fn resolve_github_context(
                 let mut numbers: Vec<u64> = prs.into_iter().map(|p| p.number).collect();
                 numbers.sort_unstable();
                 numbers.dedup();
-                numbers
+                Some(numbers)
             }
             Err(err) => {
                 tracing::debug!(
@@ -103,9 +106,9 @@ pub async fn resolve_github_context(
                     %repo,
                     branch = %candidate.branch,
                     error = %err,
-                    "PR discovery failed; yielding empty open_prs"
+                    "PR discovery failed; open_prs unknown for this tick"
                 );
-                Vec::new()
+                None
             }
         };
 

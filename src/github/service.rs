@@ -39,7 +39,10 @@ pub(crate) fn tracked_prs_from_contexts(contexts: &[RepoGithubContext]) -> Vec<T
     let mut prs: Vec<TrackedPr> = contexts
         .iter()
         .flat_map(|ctx| {
-            ctx.open_prs.iter().map(move |&number| TrackedPr {
+            // `open_prs.iter().flatten()` yields nothing for a failed
+            // discovery (None), so a transient error contributes no PRs
+            // rather than a spurious empty set.
+            ctx.open_prs.iter().flatten().map(move |&number| TrackedPr {
                 owner: ctx.owner.clone(),
                 repo: ctx.repo.clone(),
                 number,
@@ -133,8 +136,10 @@ async fn refresh_pr(client: &GitHubClient, key: &PrKey) -> RefreshOutcome {
         }
     };
 
-    // Check runs are best-effort: a failure here still yields a PrStatus with
-    // an empty CI aggregate rather than dropping the whole PR.
+    // Check runs failure must NOT collapse to "no CI": that would overwrite a
+    // previously passing/failing/pending verdict with CiState::None. Skip the
+    // PR this tick instead, leaving its last-good cached status intact for the
+    // next retry.
     let runs = match client
         .list_check_runs(&key.owner, &key.repo, &details.head.sha)
         .await
@@ -148,9 +153,9 @@ async fn refresh_pr(client: &GitHubClient, key: &PrKey) -> RefreshOutcome {
             tracing::debug!(
                 target: "github.poller",
                 owner = %key.owner, repo = %key.repo, number = key.number,
-                error = %err, "list_check_runs failed; empty CI"
+                error = %err, "list_check_runs failed; preserving prior CI status"
             );
-            Vec::new()
+            return RefreshOutcome::Skip;
         }
     };
 
@@ -169,36 +174,57 @@ async fn refresh_pr(client: &GitHubClient, key: &PrKey) -> RefreshOutcome {
 async fn persist_tracked(state: &Arc<AppState>, id: &str, tracked: Vec<TrackedPr>) -> bool {
     let new_value = (!tracked.is_empty()).then_some(tracked);
 
+    // Optimistically apply in memory, capturing the prior value so we can roll
+    // back if the disk write fails. Without the rollback, a failed write would
+    // leave memory == new_value, and the equality check above would suppress
+    // every retry, permanently diverging memory from disk.
+    let old_value;
     {
         let mut instances = state.instances.write().await;
         match instances.iter_mut().find(|i| i.id == id) {
             Some(inst) if inst.github_prs == new_value => return false,
-            Some(inst) => inst.github_prs = new_value.clone(),
+            Some(inst) => {
+                old_value = inst.github_prs.clone();
+                inst.github_prs = new_value.clone();
+            }
             None => return false,
         }
     }
 
     let profile = state.profile.clone();
-    let id = id.to_string();
+    let persist_id = id.to_string();
     let persisted = new_value.clone();
     let result = tokio::task::spawn_blocking(move || {
         let storage = crate::session::Storage::new(&profile)?;
         storage.update(|instances, _groups| {
-            if let Some(inst) = instances.iter_mut().find(|i| i.id == id) {
+            if let Some(inst) = instances.iter_mut().find(|i| i.id == persist_id) {
                 inst.github_prs = persisted;
             }
             Ok(())
         })
     })
     .await;
-    match result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            tracing::warn!(target: "github.poller", error = %e, "failed to persist github_prs")
+
+    let persisted_ok = matches!(result, Ok(Ok(())));
+    if !persisted_ok {
+        match &result {
+            Ok(Err(e)) => {
+                tracing::warn!(target: "github.poller", error = %e, "failed to persist github_prs; reverting in-memory")
+            }
+            Err(e) => {
+                tracing::warn!(target: "github.poller", error = %e, "github_prs persist task panicked; reverting in-memory")
+            }
+            Ok(Ok(())) => unreachable!(),
         }
-        Err(e) => {
-            tracing::warn!(target: "github.poller", error = %e, "github_prs persist task panicked")
+        // Roll memory back to the last persisted value so the next tick retries
+        // (only if no concurrent writer changed it in the meantime).
+        let mut instances = state.instances.write().await;
+        if let Some(inst) = instances.iter_mut().find(|i| i.id == id) {
+            if inst.github_prs == new_value {
+                inst.github_prs = old_value;
+            }
         }
+        return false;
     }
     true
 }
@@ -211,13 +237,13 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
     let mut interval = Duration::from_secs(30);
 
     loop {
-        let cfg = crate::session::profile_config::resolve_config_or_warn(&state.profile).github;
-        let base = Duration::from_secs(cfg.poll_interval_secs.max(1));
-        let max = Duration::from_secs(
-            cfg.max_poll_interval_secs
-                .max(cfg.poll_interval_secs)
-                .max(1),
-        );
+        // normalized() enforces base >= 1 and max >= base, so a hand-edited
+        // config.toml that violates the invariant is corrected here.
+        let cfg = crate::session::profile_config::resolve_config_or_warn(&state.profile)
+            .github
+            .normalized();
+        let base = Duration::from_secs(cfg.poll_interval_secs);
+        let max = Duration::from_secs(cfg.max_poll_interval_secs);
 
         if !cfg.enabled {
             if sleep_or_shutdown(&shutdown, base).await {
@@ -249,6 +275,19 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
         let mut desired: HashSet<PrKey> = HashSet::new();
         let mut changed = false;
         for inst in &instances {
+            // Keep cache entries for already-tracked PRs alive even if this
+            // tick's discovery fails, so a transient error doesn't evict
+            // their status. Seed `desired` from the persisted refs first.
+            if let Some(prs) = &inst.github_prs {
+                for t in prs {
+                    desired.insert(PrKey {
+                        owner: t.owner.clone(),
+                        repo: t.repo.clone(),
+                        number: t.number,
+                    });
+                }
+            }
+
             let contexts = resolve_github_context(inst, &client).await;
             let tracked = tracked_prs_from_contexts(&contexts);
             for t in &tracked {
@@ -258,7 +297,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     number: t.number,
                 });
             }
-            if persist_tracked(&state, &inst.id, tracked).await {
+
+            // Only rewrite github_prs when every repo's discovery succeeded.
+            // If any repo's fetch failed (open_prs == None), skip the write so
+            // a transient error can't clear previously tracked PRs.
+            let discovery_complete = contexts.iter().all(|c| c.open_prs.is_some());
+            if discovery_complete && persist_tracked(&state, &inst.id, tracked).await {
                 changed = true;
             }
         }
@@ -325,7 +369,17 @@ mod tests {
             repo: repo.to_string(),
             base_branch: None,
             branch: "feature/x".to_string(),
-            open_prs: prs.to_vec(),
+            open_prs: Some(prs.to_vec()),
+        }
+    }
+
+    fn failed_ctx(owner: &str, repo: &str) -> RepoGithubContext {
+        RepoGithubContext {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            base_branch: None,
+            branch: "feature/x".to_string(),
+            open_prs: None,
         }
     }
 
@@ -347,6 +401,13 @@ mod tests {
     #[test]
     fn empty_contexts_yield_no_tracked_prs() {
         assert!(tracked_prs_from_contexts(&[ctx("o", "r", &[])]).is_empty());
+    }
+
+    #[test]
+    fn failed_discovery_contributes_no_tracked_prs() {
+        // A None open_prs (fetch error) must not surface any tracked PR; the
+        // poller separately skips persisting when discovery is incomplete.
+        assert!(tracked_prs_from_contexts(&[failed_ctx("o", "r")]).is_empty());
     }
 
     #[test]
