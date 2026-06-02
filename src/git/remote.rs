@@ -142,6 +142,65 @@ pub fn get_remote_owner(path: &Path) -> Option<String> {
     parse_owner_from_remote_url(url)
 }
 
+/// Extract `(owner, repo)` from a git remote URL, stripping a trailing
+/// `.git`. Host-agnostic; use [`is_github_remote_url`] to gate on GitHub.
+/// Mirrors the format handling in [`parse_owner_from_remote_url`].
+pub(crate) fn parse_slug_from_remote_url(url: &str) -> Option<(String, String)> {
+    // SSH shorthand: git@host:owner/repo.git
+    if !url.contains("://") {
+        if let Some(colon_pos) = url.find(':') {
+            if url[..colon_pos].contains('@') {
+                return split_owner_repo(&url[colon_pos + 1..]);
+            }
+        }
+    }
+
+    // URL form: scheme://[user@]host/owner/repo.git
+    let without_scheme = url.split("://").nth(1).unwrap_or(url);
+    let after_host = &without_scheme[without_scheme.find('/')? + 1..];
+    split_owner_repo(after_host)
+}
+
+/// Split a `owner/repo[.git][/...]` path tail into `(owner, repo)`.
+fn split_owner_repo(path: &str) -> Option<(String, String)> {
+    let mut segments = path.split('/');
+    let owner = segments.next().filter(|s| !s.is_empty())?;
+    let repo = segments
+        .next()
+        .map(|r| r.trim_end_matches(".git"))
+        .filter(|s| !s.is_empty())?;
+    Some((owner.to_string(), repo.to_string()))
+}
+
+/// True when the remote URL's host is `github.com` (any scheme, with or
+/// without userinfo or port). GitHub Enterprise hosts are intentionally not
+/// matched; that derivation is tracked as a follow-up.
+pub(crate) fn is_github_remote_url(url: &str) -> bool {
+    let host_segment = if let Some(rest) = url.split("://").nth(1) {
+        rest.split('/').next().unwrap_or("")
+    } else if let Some(at) = url.find('@') {
+        &url[at + 1..]
+    } else {
+        ""
+    };
+    // Drop any leading `user@` and trailing `:port` / `:owner` (ssh shorthand).
+    let host = host_segment.rsplit('@').next().unwrap_or(host_segment);
+    let host = host.split([':', '/']).next().unwrap_or(host);
+    host.eq_ignore_ascii_case("github.com")
+}
+
+/// Read the `origin` remote and return `(owner, repo)` only when it points at
+/// `github.com`. `None` for non-GitHub remotes, no origin, or a non-repo path.
+pub fn github_slug(path: &Path) -> Option<(String, String)> {
+    let repo = open_repo_at(path).ok()?;
+    let remote = repo.find_remote("origin").ok()?;
+    let url = remote.url()?;
+    if !is_github_remote_url(url) {
+        return None;
+    }
+    parse_slug_from_remote_url(url)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +250,50 @@ mod tests {
     #[test]
     fn test_parse_owner_empty_url() {
         assert_eq!(parse_owner_from_remote_url(""), None);
+    }
+
+    #[test]
+    fn test_parse_slug_ssh_shorthand() {
+        assert_eq!(
+            parse_slug_from_remote_url("git@github.com:agent-of-empires/agent-of-empires.git"),
+            Some((
+                "agent-of-empires".to_string(),
+                "agent-of-empires".to_string()
+            )),
+        );
+    }
+
+    #[test]
+    fn test_parse_slug_https_no_dotgit() {
+        assert_eq!(
+            parse_slug_from_remote_url("https://github.com/mozilla-ai/lumigator"),
+            Some(("mozilla-ai".to_string(), "lumigator".to_string())),
+        );
+    }
+
+    #[test]
+    fn test_parse_slug_ssh_url() {
+        assert_eq!(
+            parse_slug_from_remote_url("ssh://git@github.com/owner/repo.git"),
+            Some(("owner".to_string(), "repo".to_string())),
+        );
+    }
+
+    #[test]
+    fn test_parse_slug_missing_repo() {
+        assert_eq!(parse_slug_from_remote_url("https://github.com/owner"), None,);
+        assert_eq!(parse_slug_from_remote_url(""), None);
+    }
+
+    #[test]
+    fn test_is_github_remote_url() {
+        assert!(is_github_remote_url("git@github.com:owner/repo.git"));
+        assert!(is_github_remote_url("https://github.com/owner/repo.git"));
+        assert!(is_github_remote_url("ssh://git@github.com/owner/repo.git"));
+        assert!(!is_github_remote_url("git@gitlab.com:owner/repo.git"));
+        assert!(!is_github_remote_url(
+            "https://github.example.com/owner/repo.git"
+        ));
+        assert!(!is_github_remote_url(""));
     }
 }
