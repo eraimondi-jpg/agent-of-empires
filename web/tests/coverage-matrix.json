@@ -261,6 +261,17 @@
       ]
     },
     {
+      "id": "settings.github-payload",
+      "kind": "vitest",
+      "risk": "low",
+      "specs": [
+        "src/components/__tests__/SettingsView.github.test.tsx"
+      ],
+      "components": [
+        "web/src/components/SettingsView.tsx"
+      ]
+    },
+    {
       "id": "settings.tmux-persistence",
       "kind": "live-playwright",
       "risk": "medium",

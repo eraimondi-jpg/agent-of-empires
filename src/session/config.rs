@@ -57,6 +57,9 @@ pub struct Config {
     pub acp: AcpConfig,
 
     #[serde(default)]
+    pub github: GitHubConfig,
+
+    #[serde(default)]
     pub logging: LoggingConfig,
 
     /// Environment variables injected into the host command line for every
@@ -522,6 +525,63 @@ fn default_replay_events() -> u32 {
 }
 fn default_replay_bytes() -> u64 {
     5_242_880
+}
+
+/// Configuration for the serve daemon's GitHub PR/CI status poller. The
+/// poller discovers PRs for each session's branch and refreshes their CI
+/// status into an in-memory cache the web dashboard reads. TUI polling is
+/// not driven by this (deferred to #676).
+#[derive(Debug, Clone, Serialize, Deserialize, SettingsSection)]
+#[setting_section(name = "github", category = "GitHub")]
+pub struct GitHubConfig {
+    /// Master switch for GitHub polling in `aoe serve`. When false, no
+    /// discovery or status polling runs and the status endpoints return
+    /// empty.
+    #[serde(default = "default_true")]
+    #[setting(label = "GitHub polling enabled", widget = "toggle")]
+    pub enabled: bool,
+    /// Base interval between PR/CI status refresh cycles, in seconds. The
+    /// adaptive backoff starts here.
+    #[serde(default = "default_github_poll_interval_secs")]
+    #[setting(label = "Poll interval (s)", widget = "number", min = 1, validate = "range:1")]
+    pub poll_interval_secs: u64,
+    /// Ceiling the adaptive backoff climbs to after repeated no-change
+    /// cycles, in seconds. Clamped to at least `poll_interval_secs` at use.
+    #[serde(default = "default_github_max_poll_interval_secs")]
+    #[setting(
+        label = "Max poll interval (s)",
+        widget = "number",
+        min = 1,
+        validate = "range:1",
+        advanced
+    )]
+    pub max_poll_interval_secs: u64,
+    /// Poll even without a resolved token. Unauthenticated GitHub is capped
+    /// at 60 requests/hour, easily exhausted across several sessions, so
+    /// this is off by default; with no token and this false the poller
+    /// idles and the API reports that auth is required.
+    #[serde(default)]
+    #[setting(label = "Allow unauthenticated polling", widget = "toggle", advanced)]
+    pub allow_unauthenticated_polling: bool,
+}
+
+impl Default for GitHubConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_interval_secs: default_github_poll_interval_secs(),
+            max_poll_interval_secs: default_github_max_poll_interval_secs(),
+            allow_unauthenticated_polling: false,
+        }
+    }
+}
+
+fn default_github_poll_interval_secs() -> u64 {
+    30
+}
+
+fn default_github_max_poll_interval_secs() -> u64 {
+    300
 }
 
 /// Session list sort order

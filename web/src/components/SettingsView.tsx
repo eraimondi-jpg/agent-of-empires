@@ -46,6 +46,7 @@ type TabId =
   | "security"
   | "devices"
   | "structured-view"
+  | "github"
   | "logging";
 
 type SidebarItem =
@@ -83,6 +84,7 @@ export function buildSidebar(): SidebarItem[] {
     { kind: "divider", label: "System" },
     { kind: "tab", id: "updates", label: "Updates" },
     { kind: "tab", id: "telemetry", label: "Telemetry" },
+    { kind: "tab", id: "github", label: "GitHub" },
     { kind: "tab", id: "logging", label: "Logging" },
   ];
 }
@@ -116,6 +118,7 @@ const ALL_TAB_IDS = new Set<TabId>([
   "security",
   "devices",
   "structured-view",
+  "github",
   "logging",
 ]);
 
@@ -605,6 +608,58 @@ export function SettingsView({
             acp={acp}
             onSaveField={saveSubField}
           />
+        );
+      }
+      case "github": {
+        const github = (settings?.github ?? {}) as Record<string, unknown>;
+        return (
+          <div className="space-y-4">
+            <p className="text-xs text-text-dim">
+              The serve daemon polls GitHub for each session&apos;s open PRs and
+              their CI status, caching the result for the dashboard. Polling runs
+              only while <code>aoe serve</code> is running.
+            </p>
+            <ToggleField
+              label="GitHub polling enabled"
+              description="Master switch for the PR/CI status poller. When off, the dashboard shows no PR status."
+              checked={(github.enabled as boolean) ?? true}
+              onChange={(v) => saveSubField("github", "enabled", v)}
+            />
+            <NumberField
+              label="Poll interval (s)"
+              description="Base seconds between PR/CI status refresh cycles. The adaptive backoff starts here."
+              value={
+                typeof github.poll_interval_secs === "number"
+                  ? github.poll_interval_secs
+                  : 30
+              }
+              min={1}
+              onChange={(v) => saveSubField("github", "poll_interval_secs", v)}
+            />
+            <NumberField
+              label="Max poll interval (s)"
+              description="Ceiling the adaptive backoff climbs to after repeated no-change cycles."
+              value={
+                typeof github.max_poll_interval_secs === "number"
+                  ? github.max_poll_interval_secs
+                  : 300
+              }
+              min={1}
+              onChange={(v) =>
+                saveSubField("github", "max_poll_interval_secs", v)
+              }
+            />
+            <ToggleField
+              label="Allow unauthenticated polling"
+              description="Poll without a GitHub token. Unauthenticated GitHub is capped at 60 requests/hour, so this is off by default."
+              checked={
+                (github.allow_unauthenticated_polling as boolean) ?? false
+              }
+              onChange={(v) =>
+                saveSubField("github", "allow_unauthenticated_polling", v)
+              }
+            />
+          </div>
         );
       }
     }

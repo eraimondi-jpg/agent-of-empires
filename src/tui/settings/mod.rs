@@ -311,6 +311,7 @@ impl SettingsView {
         if scope == SettingsScope::Global {
             push_tab(&mut rows, SettingsCategory::Telemetry);
         }
+        push_tab(&mut rows, SettingsCategory::GitHub);
         push_tab(&mut rows, SettingsCategory::Logging);
 
         rows
