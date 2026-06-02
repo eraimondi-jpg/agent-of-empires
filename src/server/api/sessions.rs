@@ -46,6 +46,13 @@ pub struct SessionResponse {
     /// default, and auto-detection. See #970.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_branch_override: Option<String>,
+    /// GitHub PR(s) tracked for this session, as persisted on the instance.
+    /// Identity only (owner/repo/number); live PR/CI status is served
+    /// separately from the GitHub status cache so this list stays cheap and
+    /// the session payload does not couple to GitHub poll latency. Omitted
+    /// when no PRs are tracked. See #1669.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github_prs: Option<Vec<crate::session::TrackedPr>>,
     pub is_sandboxed: bool,
     /// True when the session was created with `--scratch`; the
     /// `project_path` points at an auto-provisioned directory under
@@ -234,6 +241,7 @@ impl SessionResponse {
                 .as_ref()
                 .and_then(|w| w.base_branch.clone()),
             base_branch_override: inst.base_branch_override.clone(),
+            github_prs: inst.github_prs.clone(),
             is_sandboxed: inst.is_sandboxed(),
             scratch: inst.scratch,
             favorited: inst.is_favorited(),
@@ -5092,6 +5100,7 @@ mod workspace_ordering_tests {
             main_repo_path: None,
             base_branch: None,
             base_branch_override: None,
+            github_prs: None,
             is_sandboxed: false,
             scratch: false,
             has_managed_worktree: false,

@@ -1,6 +1,14 @@
 import type { RepoColor } from "./repoAppearance";
 
 /** Session data returned by the API */
+/** A GitHub pull request tracked for a session. Identity only; live PR/CI
+ *  status comes from the GitHub status endpoint. See #1669. */
+export interface TrackedPr {
+  owner: string;
+  repo: string;
+  number: number;
+}
+
 export interface SessionResponse {
   id: string;
   title: string;
@@ -28,6 +36,11 @@ export interface SessionResponse {
    *  auto-detected default. Edited via the `vs <ref>` chip in the
    *  diff header. See #970. */
   base_branch_override?: string | null;
+  /** GitHub PR(s) tracked for this session (identity only: owner/repo/
+   *  number). Live PR/CI status is fetched separately from the GitHub
+   *  status endpoint, so this list stays cheap. Absent when no PRs are
+   *  tracked. See #1669. */
+  github_prs?: TrackedPr[] | null;
   is_sandboxed: boolean;
   /** True when the session was created in scratch mode (`aoe add
    *  --scratch` or the wizard toggle). The `project_path` points

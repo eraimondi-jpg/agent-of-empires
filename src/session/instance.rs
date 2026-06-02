@@ -249,6 +249,18 @@ pub struct WorktreeInfo {
     pub base_branch: Option<String>,
 }
 
+/// A GitHub pull request tracked for a session. Persisted identity only:
+/// the live PR/CI status lives in the daemon's in-memory cache, never on
+/// disk. `owner`/`repo` are carried (not a bare slug) so multi-org and
+/// multi-repo workspaces stay unambiguous. The daemon poller is the sole
+/// writer; the resolver and request handlers only read this.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrackedPr {
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceRepo {
     pub name: String,
@@ -505,6 +517,16 @@ pub struct Instance {
     /// `get_commit_from_ref` resolves both forms.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_branch_override: Option<String>,
+
+    /// GitHub PR(s) discovered for this session's branch(es), persisted so
+    /// they survive a restart and the daemon can rebuild its poll work-list
+    /// without re-querying GitHub on every render. Written only by the serve
+    /// daemon's GitHub poller, and only when the discovered set changes. The
+    /// live PR/CI status is never stored here, only the identity. Additive
+    /// optional field: old `sessions.json` deserialize with `None`. See
+    /// #1669.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_prs: Option<Vec<TrackedPr>>,
 
     /// How this session is rendered: `Structured` (ACP native rendering) or
     /// `Terminal` (raw tmux pane). When `Structured`, aoe spawns an ACP agent
@@ -787,6 +809,7 @@ impl Instance {
             notify_on_idle: None,
             notify_on_error: None,
             base_branch_override: None,
+            github_prs: None,
             #[cfg(feature = "serve")]
             view: View::Terminal,
             #[cfg(feature = "serve")]
@@ -4835,6 +4858,53 @@ mod tests {
         let wt = deserialized.worktree_info.unwrap();
         assert_eq!(wt.branch, "feature/abc");
         assert!(wt.managed_by_aoe);
+    }
+
+    #[test]
+    fn test_instance_github_prs_roundtrip() {
+        let mut inst = Instance::new("Test", "/tmp/pr");
+        inst.github_prs = Some(vec![
+            TrackedPr {
+                owner: "agent-of-empires".to_string(),
+                repo: "agent-of-empires".to_string(),
+                number: 1668,
+            },
+            TrackedPr {
+                owner: "agent-of-empires".to_string(),
+                repo: "web".to_string(),
+                number: 42,
+            },
+        ]);
+
+        let json = serde_json::to_string(&inst).unwrap();
+        let deserialized: Instance = serde_json::from_str(&json).unwrap();
+
+        let prs = deserialized.github_prs.expect("github_prs should persist");
+        assert_eq!(prs.len(), 2);
+        assert_eq!(prs[0].number, 1668);
+        assert_eq!(prs[1].repo, "web");
+    }
+
+    #[test]
+    fn test_instance_github_prs_absent_omitted_and_backcompat() {
+        // None must not serialize, so old readers and round-trips stay clean.
+        let inst = Instance::new("Test", "/tmp/pr");
+        assert!(inst.github_prs.is_none());
+        let json = serde_json::to_string(&inst).unwrap();
+        assert!(
+            !json.contains("github_prs"),
+            "absent github_prs must be omitted from the wire form"
+        );
+
+        // Old sessions.json without the field deserializes with None.
+        let legacy = r#"{
+            "id": "abc1234567890def",
+            "title": "Legacy",
+            "project_path": "/tmp/legacy",
+            "created_at": "2025-01-01T00:00:00Z"
+        }"#;
+        let inst: Instance = serde_json::from_str(legacy).unwrap();
+        assert!(inst.github_prs.is_none());
     }
 
     // Test generate_id function properties
