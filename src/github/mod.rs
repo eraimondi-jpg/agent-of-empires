@@ -12,6 +12,7 @@ pub mod auth;
 pub mod client;
 pub mod error;
 pub mod resolver;
+pub mod status;
 
 pub use auth::{resolve_token, resolve_token_from_system, ResolvedToken, TokenSource};
 pub use client::{
