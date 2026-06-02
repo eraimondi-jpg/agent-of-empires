@@ -12,6 +12,8 @@ import type {
   DockerStatusResponse,
   CreateSessionRequest,
   SettingsFieldDescriptor,
+  GithubStatusResponse,
+  SessionGithubResponse,
 } from "./types";
 
 // GET a JSON endpoint; returns null on non-2xx or network/parse errors.
@@ -34,6 +36,25 @@ export interface SessionsEnvelope {
 
 export function fetchSessions(): Promise<SessionsEnvelope | null> {
   return fetchJson<SessionsEnvelope>("/api/sessions");
+}
+
+// --- GitHub PR/CI status ---
+
+// Batch: every session that tracks a PR, with its cached PR/CI status. One
+// round trip hydrates the whole sidebar (avoids N per-session fetches). See
+// #1670.
+export function fetchGithubStatus(): Promise<GithubStatusResponse | null> {
+  return fetchJson<GithubStatusResponse>("/api/github/status");
+}
+
+// One session's tracked PR refs plus cached status. Thin filter over the
+// batch; returns null on a 404 (unknown session) or network error.
+export function fetchSessionGithub(
+  id: string,
+): Promise<SessionGithubResponse | null> {
+  return fetchJson<SessionGithubResponse>(
+    `/api/sessions/${encodeURIComponent(id)}/github`,
+  );
 }
 
 export async function updateWorkspaceOrdering(order: string[]): Promise<boolean> {

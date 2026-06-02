@@ -9,6 +9,54 @@ export interface TrackedPr {
   number: number;
 }
 
+/** Rolled-up CI verdict for a PR's head commit. See #1670. */
+export type CiState = "none" | "pending" | "passing" | "failing";
+
+export interface CiAggregate {
+  total: number;
+  passing: number;
+  failing: number;
+  pending: number;
+  state: CiState;
+}
+
+export interface CheckSummary {
+  name: string;
+  status: string;
+  conclusion: string | null;
+}
+
+/** Live PR + CI status as cached by the serve daemon's poller. See #1670. */
+export interface PrStatus {
+  owner: string;
+  repo: string;
+  number: number;
+  state: string;
+  draft: boolean;
+  merged: boolean;
+  mergeable_state: string | null;
+  title: string;
+  html_url: string;
+  head_sha: string;
+  ci: CiAggregate;
+  checks: CheckSummary[];
+  fetched_at: string;
+}
+
+/** One session's GitHub view: persisted PR refs plus cached live status.
+ *  `statuses` may be shorter than `refs` when the poller has not fetched a
+ *  PR yet. */
+export interface SessionGithubResponse {
+  refs: TrackedPr[];
+  statuses: PrStatus[];
+}
+
+/** Batch GitHub status payload keyed by session id. Only sessions that track
+ *  at least one PR appear. */
+export interface GithubStatusResponse {
+  sessions: Record<string, SessionGithubResponse>;
+}
+
 export interface SessionResponse {
   id: string;
   title: string;
