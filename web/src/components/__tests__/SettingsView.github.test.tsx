@@ -84,6 +84,23 @@ describe("Settings GitHub tab", () => {
     });
   });
 
+  it("raises max when the base is set above it", async () => {
+    const { container } = renderGithubTab();
+    await screen.findByText("GitHub polling enabled");
+
+    // Defaults: base 30, max 300. Setting base to 400 must also bump max.
+    commit(numberInputByLabel(container, "Poll interval (s)"), "400");
+
+    await waitFor(() =>
+      expect(vi.mocked(api.updateProfileSettings)).toHaveBeenCalledWith("main", {
+        github: { poll_interval_secs: 400 },
+      }),
+    );
+    expect(vi.mocked(api.updateProfileSettings)).toHaveBeenCalledWith("main", {
+      github: { max_poll_interval_secs: 400 },
+    });
+  });
+
   it("saves the enabled and unauthenticated toggles", async () => {
     const { container } = renderGithubTab();
     await screen.findByText("GitHub polling enabled");

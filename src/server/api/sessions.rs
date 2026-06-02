@@ -3824,6 +3824,33 @@ mod tests {
         assert_eq!(resp.base_branch_override.as_deref(), Some("upstream/main"));
     }
 
+    fn session_response_surfaces_github_prs() {
+        let mut inst = make_test_instance();
+        // Default: no tracked PRs -> field omitted from JSON.
+        let json = serde_json::to_value(SessionResponse::from_instance(&inst, false)).unwrap();
+        assert!(
+            json.get("github_prs").is_none(),
+            "github_prs should be omitted when None, got: {json}"
+        );
+
+        inst.github_prs = Some(vec![crate::session::TrackedPr {
+            owner: "agent-of-empires".to_string(),
+            repo: "agent-of-empires".to_string(),
+            number: 1823,
+        }]);
+        let json = serde_json::to_value(SessionResponse::from_instance(&inst, false)).unwrap();
+        let prs = json
+            .get("github_prs")
+            .and_then(|v| v.as_array())
+            .expect("github_prs should serialize as an array");
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].get("number").and_then(|n| n.as_u64()), Some(1823));
+        assert_eq!(
+            prs[0].get("owner").and_then(|o| o.as_str()),
+            Some("agent-of-empires")
+        );
+    }
+
     #[test]
     fn resolve_diff_base_prefers_override_then_worktree_then_config_then_auto() {
         let tmp = tempfile::tempdir().unwrap();
