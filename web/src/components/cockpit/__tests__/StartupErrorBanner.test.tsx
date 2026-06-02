@@ -13,7 +13,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 
-import { StartupErrorBanner } from "../CockpitView";
+import { ProviderAuthErrorBanner, StartupErrorBanner } from "../CockpitView";
 
 afterEach(() => {
   cleanup();
@@ -43,7 +43,7 @@ describe("StartupErrorBanner native-binary branch", () => {
 
   it("renders arch/loader remediation copy, not the doctor --fix fallback", () => {
     const { container } = render(
-      <StartupErrorBanner sessionId="s-1" message={NATIVE_BINARY_MSG} />,
+      <StartupErrorBanner sessionId="s-1" agent={null} message={NATIVE_BINARY_MSG} />,
     );
     expect(container.textContent).toContain("Architecture mismatch");
     expect(container.textContent).toContain("dynamic loader");
@@ -53,7 +53,7 @@ describe("StartupErrorBanner native-binary branch", () => {
 
   it("links the native-binary docs anchor", () => {
     const { container } = render(
-      <StartupErrorBanner sessionId="s-1" message={NATIVE_BINARY_MSG} />,
+      <StartupErrorBanner sessionId="s-1" agent={null} message={NATIVE_BINARY_MSG} />,
     );
     const anchor = container.querySelector("a[href*='cockpit']");
     expect(anchor).not.toBeNull();
@@ -73,7 +73,7 @@ describe("StartupErrorBanner fallback branch (unchanged)", () => {
       }),
     );
     const { container } = render(
-      <StartupErrorBanner sessionId="s-1" message="some unknown failure" />,
+      <StartupErrorBanner sessionId="s-1" agent={null} message="some unknown failure" />,
     );
     expect(container.textContent).toContain("aoe cockpit doctor --fix");
   });
@@ -94,7 +94,7 @@ describe("AgentLogDisclosure", () => {
     });
     vi.stubGlobal("fetch", fetchSpy);
     render(
-      <StartupErrorBanner sessionId="s-1" message={NATIVE_BINARY_MSG} />,
+      <StartupErrorBanner sessionId="s-1" agent={null} message={NATIVE_BINARY_MSG} />,
     );
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -113,7 +113,7 @@ describe("AgentLogDisclosure", () => {
     });
     vi.stubGlobal("fetch", fetchSpy);
     const { getByTestId } = render(
-      <StartupErrorBanner sessionId="abc-123" message={NATIVE_BINARY_MSG} />,
+      <StartupErrorBanner sessionId="abc-123" agent={null} message={NATIVE_BINARY_MSG} />,
     );
     fireEvent.click(getByTestId("cockpit-agent-log-toggle"));
     await waitFor(() => {
@@ -143,7 +143,7 @@ describe("AgentLogDisclosure", () => {
     });
     vi.stubGlobal("fetch", fetchSpy);
     const { getByTestId, container } = render(
-      <StartupErrorBanner sessionId="s-1" message={NATIVE_BINARY_MSG} />,
+      <StartupErrorBanner sessionId="s-1" agent={null} message={NATIVE_BINARY_MSG} />,
     );
     fireEvent.click(getByTestId("cockpit-agent-log-toggle"));
     await waitFor(() => {
@@ -159,7 +159,7 @@ describe("AgentLogDisclosure", () => {
     });
     vi.stubGlobal("fetch", fetchSpy);
     const { getByTestId, container } = render(
-      <StartupErrorBanner sessionId="s-1" message={NATIVE_BINARY_MSG} />,
+      <StartupErrorBanner sessionId="s-1" agent={null} message={NATIVE_BINARY_MSG} />,
     );
     fireEvent.click(getByTestId("cockpit-agent-log-toggle"));
     await waitFor(() => {
@@ -182,7 +182,7 @@ describe("AgentLogDisclosure", () => {
     });
     vi.stubGlobal("fetch", fetchSpy);
     const { getByTestId, container } = render(
-      <StartupErrorBanner sessionId="s-1" message={NATIVE_BINARY_MSG} />,
+      <StartupErrorBanner sessionId="s-1" agent={null} message={NATIVE_BINARY_MSG} />,
     );
     fireEvent.click(getByTestId("cockpit-agent-log-toggle"));
     await waitFor(() => {
@@ -204,7 +204,7 @@ describe("AgentLogDisclosure", () => {
     });
     vi.stubGlobal("fetch", fetchSpy);
     const { getByTestId, container } = render(
-      <StartupErrorBanner sessionId="s-1" message={NATIVE_BINARY_MSG} />,
+      <StartupErrorBanner sessionId="s-1" agent={null} message={NATIVE_BINARY_MSG} />,
     );
     fireEvent.click(getByTestId("cockpit-agent-log-toggle"));
     await waitFor(() => {
@@ -226,7 +226,7 @@ describe("AgentLogDisclosure", () => {
     });
     vi.stubGlobal("fetch", fetchSpy);
     const { getByTestId, queryByTestId } = render(
-      <StartupErrorBanner sessionId="s-1" message={NATIVE_BINARY_MSG} />,
+      <StartupErrorBanner sessionId="s-1" agent={null} message={NATIVE_BINARY_MSG} />,
     );
     const toggle = getByTestId("cockpit-agent-log-toggle");
     fireEvent.click(toggle);
@@ -251,7 +251,7 @@ describe("AgentLogDisclosure", () => {
     });
     vi.stubGlobal("fetch", fetchSpy);
     const { getByTestId } = render(
-      <StartupErrorBanner sessionId="s-1" message={NATIVE_BINARY_MSG} />,
+      <StartupErrorBanner sessionId="s-1" agent={null} message={NATIVE_BINARY_MSG} />,
     );
     fireEvent.click(getByTestId("cockpit-agent-log-toggle"));
     await waitFor(() => {
@@ -261,5 +261,85 @@ describe("AgentLogDisclosure", () => {
     await waitFor(() => {
       expect(fetchSpy).toHaveBeenCalledTimes(2);
     });
+  });
+});
+
+// Anti-regression for #1712: provider-auth remediation must be keyed off
+// the active agent. A Gemini session must never see Claude-specific
+// ANTHROPIC_API_KEY / `claude /login` guidance, and vice versa.
+describe("ProviderAuthErrorBanner remediation is provider-aware", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ exists: false, tail: "" }),
+      }),
+    );
+  });
+
+  const GEMINI_INFO = {
+    status: "API key expired. Please renew the API key.",
+    reason: "API_KEY_INVALID",
+  };
+
+  it("renders Gemini-specific copy, never the Claude env var or login", () => {
+    const { container, getByTestId } = render(
+      <ProviderAuthErrorBanner sessionId="s-1" agent="gemini" info={GEMINI_INFO} />,
+    );
+    expect(getByTestId("cockpit-provider-auth-banner-s-1")).not.toBeNull();
+    expect(container.textContent).toContain("Gemini API key");
+    expect(container.textContent).toContain("GEMINI_API_KEY");
+    // The raw provider message is surfaced verbatim.
+    expect(container.textContent).toContain("renew the API key");
+    expect(container.textContent).not.toContain("ANTHROPIC_API_KEY");
+    expect(container.textContent).not.toContain("claude /login");
+  });
+
+  it("renders Claude-specific copy when the agent is claude", () => {
+    const { container } = render(
+      <ProviderAuthErrorBanner
+        sessionId="s-1"
+        agent="claude"
+        info={{ status: "invalid x-api-key", reason: null }}
+      />,
+    );
+    expect(container.textContent).toContain("ANTHROPIC_API_KEY");
+    expect(container.textContent).toContain("claude /login");
+    expect(container.textContent).not.toContain("GEMINI_API_KEY");
+  });
+
+  it("renders generic copy for an unknown agent", () => {
+    const { container } = render(
+      <ProviderAuthErrorBanner
+        sessionId="s-1"
+        agent={null}
+        info={{ status: "auth failed", reason: null }}
+      />,
+    );
+    expect(container.textContent).toContain("configured provider API key");
+    expect(container.textContent).not.toContain("GEMINI_API_KEY");
+    expect(container.textContent).not.toContain("ANTHROPIC_API_KEY");
+  });
+
+  it("hides the banner when dismissed", () => {
+    const { queryByTestId, getByText } = render(
+      <ProviderAuthErrorBanner sessionId="s-1" agent="gemini" info={GEMINI_INFO} />,
+    );
+    fireEvent.click(getByText("Dismiss"));
+    expect(queryByTestId("cockpit-provider-auth-banner-s-1")).toBeNull();
+  });
+
+  it("StartupErrorBanner auth branch is also provider-aware (Gemini)", () => {
+    const { container } = render(
+      <StartupErrorBanner
+        sessionId="s-1"
+        agent="gemini"
+        message="ACP connection failed: invalid api key"
+      />,
+    );
+    expect(container.textContent).toContain("GEMINI_API_KEY");
+    expect(container.textContent).not.toContain("ANTHROPIC_API_KEY");
   });
 });

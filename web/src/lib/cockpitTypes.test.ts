@@ -2449,3 +2449,52 @@ describe("applyEvent / RateLimitAutoResumed (#1722)", () => {
     expect(state.rateLimit).toBeNull();
   });
 });
+
+describe("applyEvent / ProviderAuthInvalid (#1712)", () => {
+  const authEvent = (seq: number) => ({
+    session_id: "s-1",
+    seq,
+    event: {
+      ProviderAuthInvalid: {
+        info: {
+          status: "API key expired. Please renew the API key.",
+          reason: "API_KEY_INVALID",
+        },
+      },
+    },
+  });
+
+  it("seeds the provider-auth snapshot and clears any startup error", () => {
+    let state: CockpitState = applyEvent(emptyCockpitState(), {
+      session_id: "s-1",
+      seq: 1,
+      event: { AgentStartupError: { message: "boom" } },
+    });
+    expect(state.startupError).toBe("boom");
+
+    state = applyEvent(state, authEvent(2));
+    expect(state.providerAuthError?.reason).toBe("API_KEY_INVALID");
+    expect(state.startupError).toBeNull();
+  });
+
+  it("keeps the banner on a non-success Stopped, clears on prompt_complete", () => {
+    let state: CockpitState = applyEvent(emptyCockpitState(), authEvent(1));
+    expect(state.providerAuthError).not.toBeNull();
+
+    // A respawn-style terminal reason must NOT clear it; only a proven
+    // successful turn does (the key is validated at prompt time).
+    state = applyEvent(state, {
+      session_id: "s-1",
+      seq: 2,
+      event: { Stopped: { reason: "agent_unresponsive" } },
+    });
+    expect(state.providerAuthError).not.toBeNull();
+
+    state = applyEvent(state, {
+      session_id: "s-1",
+      seq: 3,
+      event: { Stopped: { reason: "prompt_complete" } },
+    });
+    expect(state.providerAuthError).toBeNull();
+  });
+});

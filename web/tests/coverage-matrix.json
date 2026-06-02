@@ -1496,6 +1496,19 @@
       ]
     },
     {
+      "id": "cockpit.provider-auth-banner",
+      "kind": "vitest",
+      "risk": "high",
+      "specs": [
+        "src/components/cockpit/__tests__/StartupErrorBanner.test.tsx",
+        "src/lib/cockpitTypes.test.ts"
+      ],
+      "components": [
+        "web/src/components/cockpit/CockpitView.tsx",
+        "web/src/lib/cockpitTypes.ts"
+      ]
+    },
+    {
       "id": "read-only.mode",
       "kind": "live-playwright",
       "risk": "high",

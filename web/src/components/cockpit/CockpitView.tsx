@@ -88,6 +88,7 @@ import type {
   ApprovalDecision,
   CockpitState,
   Plan,
+  ProviderAuthInfo,
   QueuedPrompt,
   RejectedPrompt,
   ToolCall,
@@ -344,8 +345,19 @@ function CockpitChrome({
         }
       </RateLimitRecoverySection>
 
-      {state.startupError && (
-        <StartupErrorBanner sessionId={sessionId} message={state.startupError} />
+      {state.providerAuthError && (
+        <ProviderAuthErrorBanner
+          sessionId={sessionId}
+          agent={state.agent}
+          info={state.providerAuthError}
+        />
+      )}
+      {state.startupError && !state.providerAuthError && (
+        <StartupErrorBanner
+          sessionId={sessionId}
+          agent={state.agent}
+          message={state.startupError}
+        />
       )}
       {(() => {
         const variant = pickWorkerStoppedVariant({
@@ -1690,11 +1702,165 @@ export function SnoozedWorkerStoppedBanner({
   );
 }
 
+/** Provider-aware remediation copy for an invalid or expired API key.
+ *  Keyed off the active cockpit agent so a Gemini session never sees
+ *  Claude-specific `ANTHROPIC_API_KEY` / `claude /login` guidance, and
+ *  vice versa. Shared by the prompt-time `ProviderAuthErrorBanner` and
+ *  the handshake-time `StartupErrorBanner` auth branch. See #1712. */
+export function ProviderAuthRemediation({ agent }: { agent: string | null }) {
+  if (agent === "gemini") {
+    return (
+      <>
+        Your Gemini API key is invalid or expired. Renew or replace it, set{" "}
+        <code className="rounded bg-rose-900/60 px-1">GEMINI_API_KEY</code> in
+        the environment that runs{" "}
+        <code className="rounded bg-rose-900/60 px-1">aoe serve</code> (or fix
+        the configured key source), then retry.
+      </>
+    );
+  }
+  if (agent === "codex") {
+    return (
+      <>
+        Your OpenAI/Codex API key is invalid or expired. Renew or replace it,
+        set <code className="rounded bg-rose-900/60 px-1">OPENAI_API_KEY</code>{" "}
+        in the environment that runs{" "}
+        <code className="rounded bg-rose-900/60 px-1">aoe serve</code>, then
+        retry.
+      </>
+    );
+  }
+  if (agent === "claude") {
+    return (
+      <>
+        The adapter is installed but has no Claude credentials. Either set{" "}
+        <code className="rounded bg-rose-900/60 px-1">ANTHROPIC_API_KEY</code>{" "}
+        in the env that runs{" "}
+        <code className="rounded bg-rose-900/60 px-1">aoe serve</code>, or run{" "}
+        <code className="rounded bg-rose-900/60 px-1">claude /login</code> in a
+        terminal to write credentials to{" "}
+        <code className="rounded bg-rose-900/60 px-1">~/.claude</code>, then
+        restart aoe.
+      </>
+    );
+  }
+  return (
+    <>
+      The configured provider API key is invalid or expired. Renew or replace
+      it in the environment that runs{" "}
+      <code className="rounded bg-rose-900/60 px-1">aoe serve</code>, then retry.
+    </>
+  );
+}
+
+/** Banner for a non-retryable provider auth failure on `session/prompt`
+ *  (e.g. Gemini `API_KEY_INVALID`). Distinct from `StartupErrorBanner`:
+ *  the worker is parked, not crash-looping, so remediation points at
+ *  renewing provider credentials (provider-aware via the active agent)
+ *  rather than reinstalling the adapter. Retry re-spawns the worker once
+ *  the user has fixed the key out of band; the banner also clears on the
+ *  next successful prompt. Dismiss is a local safety valve. See #1712. */
+export function ProviderAuthErrorBanner({
+  sessionId,
+  agent,
+  info,
+}: {
+  sessionId: string;
+  agent: string | null;
+  info: ProviderAuthInfo;
+}) {
+  const [dismissed, setDismissed] = useState(false);
+  const [retryState, setRetryState] = useState<
+    "idle" | "retrying" | "ok" | "failed"
+  >("idle");
+  const [retryError, setRetryError] = useState<string | null>(null);
+
+  const handleRetry = async () => {
+    setRetryState("retrying");
+    setRetryError(null);
+    try {
+      const res = await fetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/cockpit/spawn`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        },
+      );
+      if (res.ok) {
+        setRetryState("ok");
+      } else {
+        const detail = (await res.text().catch(() => "")).slice(0, 200);
+        setRetryState("failed");
+        setRetryError(`Server returned ${res.status}. ${detail}`.trim());
+      }
+    } catch (e) {
+      setRetryState("failed");
+      setRetryError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  if (dismissed) {
+    return null;
+  }
+
+  return (
+    <div
+      className="border-b border-rose-900/60 bg-rose-950/40 px-4 py-3 text-rose-200"
+      data-testid={`cockpit-provider-auth-banner-${sessionId}`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-medium">
+            Provider authentication failed
+          </div>
+          <pre className="mt-1 whitespace-pre-wrap text-xs text-rose-100/90">
+            {info.status}
+          </pre>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <button
+            type="button"
+            onClick={handleRetry}
+            disabled={retryState === "retrying"}
+            className="rounded-md border border-rose-800/60 bg-rose-900/40 px-3 py-1 text-xs font-medium text-rose-100 hover:bg-rose-900/60 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {retryState === "retrying" ? "Retrying…" : "Retry"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setDismissed(true)}
+            className="rounded-md border border-rose-800/60 bg-rose-900/40 px-3 py-1 text-xs font-medium text-rose-100 hover:bg-rose-900/60"
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>
+      {retryState === "ok" && (
+        <div className="mt-2 text-xs text-emerald-200/90">
+          Spawn requested. New events should start streaming in shortly.
+        </div>
+      )}
+      {retryState === "failed" && retryError && (
+        <div className="mt-2 text-xs text-rose-100/90">
+          Retry failed: {retryError}
+        </div>
+      )}
+      <div className="mt-2 text-xs text-rose-200/80">
+        <ProviderAuthRemediation agent={agent} />
+      </div>
+      <AgentLogDisclosure sessionId={sessionId} />
+    </div>
+  );
+}
+
 export function StartupErrorBanner({
   sessionId,
+  agent,
   message,
 }: {
   sessionId: string;
+  agent: string | null;
   message: string;
 }) {
   const isAuth = /authentic|login|api[_ -]?key/i.test(message);
@@ -1778,15 +1944,7 @@ export function StartupErrorBanner({
       )}
       <div className="mt-2 text-xs text-rose-200/80">
         {isAuth ? (
-          <>
-            The adapter is installed but has no Claude credentials. Either set{" "}
-            <code className="rounded bg-rose-900/60 px-1">ANTHROPIC_API_KEY</code>{" "}
-            in the env that runs <code className="rounded bg-rose-900/60 px-1">aoe serve</code>,
-            or run <code className="rounded bg-rose-900/60 px-1">claude /login</code>{" "}
-            in a terminal to write credentials to{" "}
-            <code className="rounded bg-rose-900/60 px-1">~/.claude</code>,
-            then restart aoe.
-          </>
+          <ProviderAuthRemediation agent={agent} />
         ) : isCapacity ? (
           <>
             All cockpit worker slots are in use. Either raise{" "}

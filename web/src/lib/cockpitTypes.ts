@@ -81,6 +81,16 @@ export interface RateLimitInfo {
   kind: string;
 }
 
+/** Detail for a non-retryable provider-auth failure on `session/prompt`
+ *  (e.g. Gemini `API_KEY_INVALID` / "API key expired"). `status` is the
+ *  raw provider message; `reason` is the structured provider code when
+ *  present. Provider-specific remediation copy is chosen in the UI off
+ *  the active agent, not carried here. See #1712. */
+export interface ProviderAuthInfo {
+  status: string;
+  reason: string | null;
+}
+
 export interface SessionUsage {
   /** Tokens currently in context. */
   used: number;
@@ -258,6 +268,7 @@ export type CockpitEvent =
   | "ThinkingStarted"
   | "ThinkingEnded"
   | { RateLimit: { info: RateLimitInfo } }
+  | { ProviderAuthInvalid: { info: ProviderAuthInfo } }
   | { RateLimitAutoResumed: { resets_at: string } }
   | { UsageUpdated: { usage: SessionUsage } }
   | { ModeChanged: { mode: SessionMode } }
@@ -371,6 +382,13 @@ export interface CockpitState {
   recentDiffs: DiffPreview[];
   thinking: boolean;
   rateLimit: RateLimitInfo | null;
+  /** Set when a `session/prompt` failed with a non-retryable provider
+   *  auth error (e.g. Gemini `API_KEY_INVALID`). Drives the
+   *  provider-aware remediation banner. Cleared on the next successful
+   *  `Stopped { reason: "prompt_complete" }`, which is the only proof
+   *  the user's new credentials work (the key is validated at prompt
+   *  time, not handshake). See #1712. */
+  providerAuthError: ProviderAuthInfo | null;
   /** Latest agent-reported context-window usage. Null until the agent
    *  emits its first ACP `UsageUpdate`. */
   sessionUsage: SessionUsage | null;
@@ -674,6 +692,7 @@ export function emptyCockpitState(): CockpitState {
     recentDiffs: [],
     thinking: false,
     rateLimit: null,
+    providerAuthError: null,
     sessionUsage: null,
     usageBaseline: null,
     assistantMessage: "",
@@ -989,6 +1008,16 @@ export function applyEvent(
     next.rateLimit = event.RateLimit.info;
     return next;
   }
+  if ("ProviderAuthInvalid" in event) {
+    // Non-retryable provider auth failure (invalid/expired key). Seed the
+    // snapshot that drives the provider-aware remediation banner, and
+    // clear any free-form startup error so the two banners can't both
+    // render. Cleared on the next successful Stopped{prompt_complete}.
+    // See #1712.
+    next.providerAuthError = event.ProviderAuthInvalid.info;
+    next.startupError = null;
+    return next;
+  }
   if ("RateLimitAutoResumed" in event) {
     // The reconciler crossed the reset deadline and is respawning the
     // worker (opt-in cockpit.rate_limit_auto_resume). Clear the parked
@@ -1191,6 +1220,15 @@ export function applyEvent(
       next.workerIdleStopped = true;
       next.workerStopped = false;
       next.workerRestarting = false;
+    }
+    // A genuinely successful turn is the only proof that out-of-band
+    // fixed credentials now work (the key is validated at prompt time,
+    // not handshake), so clear a lingering provider-auth banner here
+    // rather than on respawn/handshake, which would clear it before the
+    // new key is exercised and flicker if the new key is also bad. See
+    // #1712.
+    if (event.Stopped.reason === "prompt_complete") {
+      next.providerAuthError = null;
     }
     // Some upstream slash commands (e.g. /usage, /status, /memory in
     // claude-agent-acp) advertise via available_commands_update but
