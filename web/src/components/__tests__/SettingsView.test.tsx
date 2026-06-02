@@ -39,6 +39,7 @@ describe("buildSidebar", () => {
       { kind: "divider", label: "System" },
       { kind: "tab", id: "updates", label: "Updates" },
       { kind: "tab", id: "telemetry", label: "Telemetry" },
+      { kind: "tab", id: "github", label: "GitHub" },
       { kind: "tab", id: "logging", label: "Logging" },
     ]);
   });

@@ -194,7 +194,7 @@ pub(crate) fn is_github_remote_url(url: &str) -> bool {
 pub fn github_slug(path: &Path) -> Option<(String, String)> {
     let repo = open_repo_at(path).ok()?;
     let remote = repo.find_remote("origin").ok()?;
-    let url = remote.url()?;
+    let url = remote.url().ok()?;
     if !is_github_remote_url(url) {
         return None;
     }

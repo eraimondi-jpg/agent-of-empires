@@ -228,23 +228,25 @@ impl GitHubClient {
             self.api_base, owner, repo, git_ref
         );
 
-        let mut collected: Vec<CheckRun> = Vec::new();
-        let mut total_count = 0u64;
-        let mut page = 1u32;
-        loop {
-            let request = self
-                .http
-                .get(&url)
-                .query(&[("per_page", "100".to_string()), ("page", page.to_string())]);
-            let resp: CheckRunsResponse = self.send_json(request).await?;
-            total_count = resp.total_count;
-            let returned = resp.check_runs.len();
-            collected.extend(resp.check_runs);
-            // Stop when we have them all, or when a page comes back empty
-            // (defensive: a lying total_count must not loop forever).
-            if returned == 0 || collected.len() as u64 >= total_count {
+        // First page establishes total_count; page through the rest until we
+        // have them all (or a page comes back empty, defensive against a lying
+        // total_count looping forever).
+        let page_query = |page: u32| [("per_page", "100".to_string()), ("page", page.to_string())];
+        let first: CheckRunsResponse = self
+            .send_json(self.http.get(&url).query(&page_query(1)))
+            .await?;
+        let total_count = first.total_count;
+        let mut collected = first.check_runs;
+
+        let mut page = 2u32;
+        while (collected.len() as u64) < total_count {
+            let resp: CheckRunsResponse = self
+                .send_json(self.http.get(&url).query(&page_query(page)))
+                .await?;
+            if resp.check_runs.is_empty() {
                 break;
             }
+            collected.extend(resp.check_runs);
             page += 1;
         }
 
