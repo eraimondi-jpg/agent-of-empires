@@ -371,6 +371,11 @@ pub struct AppState {
     /// create counter) are cleared only on success. The telemetry loop is the
     /// sole reader/writer, so it never overlaps an in-flight build.
     telemetry_last_reported: std::sync::Mutex<Option<ReportedServeSignals>>,
+    /// In-memory cache of GitHub PR + CI status, written only by the daemon's
+    /// GitHub poll loop (`github::service::run_poll_loop`) and read by the
+    /// `/api/github/status` handlers. Volatile by design: rebuilt from the
+    /// session list after a restart, never persisted. See #1670.
+    pub github_status: Arc<RwLock<crate::github::status::GithubStatusCache>>,
     /// Resolved when the daemon receives SIGINT/SIGTERM/SIGHUP. Long-lived
     /// handlers (acp WS, terminal WS) clone this and `select!` on
     /// `cancelled()` so they exit promptly instead of holding axum's
@@ -857,6 +862,7 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
         telemetry_session_creates: std::sync::atomic::AtomicU32::new(0),
         telemetry_structured: StructuredTelemetryCounters::default(),
         telemetry_last_reported: std::sync::Mutex::new(None),
+        github_status: Arc::new(RwLock::new(crate::github::status::GithubStatusCache::new())),
         shutdown: CancellationToken::new(),
     });
 
@@ -952,6 +958,21 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
             crate::task_util::PanicPolicy::Log,
             async move {
                 acp_event_listener(listener_state).await;
+            },
+        );
+    }
+
+    // GitHub PR/CI poll loop: discovers PRs per session, persists their
+    // numbers, and refreshes status into state.github_status. Self-gates on
+    // [github].enabled and on token availability, so it is cheap to always
+    // spawn. See #1670.
+    {
+        let github_state = state.clone();
+        crate::task_util::spawn_supervised(
+            "server.github_poll_loop",
+            crate::task_util::PanicPolicy::Log,
+            async move {
+                crate::github::service::run_poll_loop(github_state).await;
             },
         );
     }
