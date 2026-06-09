@@ -24,6 +24,7 @@
 - `docs/development/adding-settings.md`: guide for adding a setting via the single-source schema.
 - `scripts/`: installation and utility scripts.
 - `xtask/`: build automation workspace.
+- `aoe-plugin-api/`: plugin manifest and capability types (see `docs/development/internals/plugin-system.md`).
 
 - `contrib/`: community-maintained integration files (e.g., OpenClaw skill). Checked by `cargo xtask check-skill` in CI.
 

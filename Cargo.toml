@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "xtask", "aoe-settings-derive"]
+members = [".", "xtask", "aoe-settings-derive", "aoe-plugin-api"]
 
 [package]
 name = "agent-of-empires"
