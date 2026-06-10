@@ -88,6 +88,27 @@ pub struct Config {
     /// palette (Ctrl+K).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub tools: HashMap<String, ToolSessionConfig>,
+
+    /// Per-plugin configuration keyed by plugin id (`[plugins."aoe.status"]`).
+    /// An explicit typed map rather than a root-level flatten so unknown core
+    /// keys still fail loudly and plugin settings survive every config save.
+    /// Settings of a disabled plugin persist on disk but disappear from every
+    /// rendered surface; re-enabling restores them.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub plugins: std::collections::BTreeMap<String, PluginConfig>,
+}
+
+/// Configuration for one installed plugin.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginConfig {
+    /// Whether the plugin's contributions are active. Disabled plugins keep
+    /// their settings on disk but contribute nothing to any surface.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Plugin-defined settings, schema'd by the plugin manifest and rendered
+    /// generically by the TUI and web settings surfaces.
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    pub settings: toml::Table,
 }
 
 /// Configuration for a user-defined tool session (lazygit, yazi, tig, etc.)
@@ -2279,6 +2300,46 @@ mod tests {
         assert_eq!(config.default_profile, "custom");
         // Other fields should have defaults
         assert!(!config.worktree.enabled);
+    }
+
+    #[test]
+    fn test_plugins_table_round_trips_through_save() {
+        // Settings of a disabled plugin must survive serialize/deserialize:
+        // disabling hides the section from every surface but never destroys
+        // the user's values.
+        let toml_in = r#"
+            [plugins."aoe.status"]
+            enabled = false
+
+            [plugins."aoe.status".settings]
+            poll_interval_ms = 1000
+            verbose = true
+        "#;
+        let config: Config = toml::from_str(toml_in).unwrap();
+        let plugin = &config.plugins["aoe.status"];
+        assert!(!plugin.enabled);
+        assert_eq!(
+            plugin.settings["poll_interval_ms"],
+            toml::Value::Integer(1000)
+        );
+
+        let serialized = toml::to_string(&config).unwrap();
+        let reloaded: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(
+            reloaded.plugins["aoe.status"].settings["verbose"],
+            toml::Value::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn test_plugins_default_empty_and_omitted_from_toml() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.plugins.is_empty());
+        let serialized = toml::to_string(&config).unwrap();
+        assert!(
+            !serialized.contains("[plugins"),
+            "empty plugins map must not serialize a stray section"
+        );
     }
 
     // Tests for ThemeConfig

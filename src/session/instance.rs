@@ -445,6 +445,13 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_at: Option<DateTime<Utc>>,
 
+    /// Namespaced per-session plugin data, keyed by plugin id. A plugin reads
+    /// and writes only its own slot, through the `session.meta.{get,set,cas}`
+    /// host API; writes publish a `session.meta.changed` event. Data of an
+    /// uninstalled plugin is retained (cheap, and reinstalling restores it).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub plugin_meta: std::collections::BTreeMap<String, serde_json::Value>,
+
     /// Scratch-session marker. When true, `project_path` points at an
     /// auto-provisioned directory under `<app_dir>/scratch/<id>/` that the
     /// deletion path removes on `aoe rm` (unless the user opts in to keeping
@@ -795,6 +802,7 @@ impl Instance {
             snoozed_until: None,
             idle_dormant_since: None,
             pinned_at: None,
+            plugin_meta: std::collections::BTreeMap::new(),
             scratch: false,
             worktree_info: None,
             workspace_info: None,
@@ -3792,6 +3800,30 @@ fn pane_has_agent_content(raw_content: &str, tool: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_meta_round_trips_and_stays_off_disk_when_empty() {
+        let mut inst = Instance::new("t", "/tmp/x");
+        let json = serde_json::to_string(&inst).unwrap();
+        assert!(
+            !json.contains("plugin_meta"),
+            "empty plugin_meta must not serialize"
+        );
+
+        inst.plugin_meta.insert(
+            "aoe.attention".to_string(),
+            serde_json::json!({ "score": 3 }),
+        );
+        let json = serde_json::to_string(&inst).unwrap();
+        let back: Instance = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.plugin_meta["aoe.attention"]["score"], 3);
+
+        // Rows written before the field existed deserialize to an empty map.
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v.as_object_mut().unwrap().remove("plugin_meta");
+        let legacy: Instance = serde_json::from_value(v).unwrap();
+        assert!(legacy.plugin_meta.is_empty());
+    }
 
     #[test]
     fn container_terminal_autodetect_cmd_resolves_login_shell() {
