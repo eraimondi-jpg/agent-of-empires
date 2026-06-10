@@ -36,6 +36,9 @@ tokio = { version = "1.52", features = ["full"] }
 # Settings single-source-of-truth derive (#1692)
 aoe-settings-derive = { path = "aoe-settings-derive" }
 
+# Plugin manifest and capability types (#268)
+aoe-plugin-api = { path = "aoe-plugin-api" }
+
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -173,6 +176,10 @@ default = []
 # integration tests in `tests/` can poke them. Not enabled by default — only
 # used by `cargo test`.
 test-support = []
+# Build without the bundled first-party plugins (status detection, attention
+# sort). CI runs the core test suite with this on to prove the core ships
+# with all default plugins disabled (#268 acceptance criterion 1).
+no-default-plugins = []
 serve = [
     "axum",
     "tower-http",

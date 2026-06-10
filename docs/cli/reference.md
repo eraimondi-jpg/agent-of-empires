@@ -37,6 +37,14 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe group create`↴](#aoe-group-create)
 * [`aoe group delete`↴](#aoe-group-delete)
 * [`aoe group move`↴](#aoe-group-move)
+* [`aoe plugin`↴](#aoe-plugin)
+* [`aoe plugin list`↴](#aoe-plugin-list)
+* [`aoe plugin info`↴](#aoe-plugin-info)
+* [`aoe plugin install`↴](#aoe-plugin-install)
+* [`aoe plugin uninstall`↴](#aoe-plugin-uninstall)
+* [`aoe plugin enable`↴](#aoe-plugin-enable)
+* [`aoe plugin disable`↴](#aoe-plugin-disable)
+* [`aoe plugin update`↴](#aoe-plugin-update)
 * [`aoe profile`↴](#aoe-profile)
 * [`aoe profile list`↴](#aoe-profile-list)
 * [`aoe profile create`↴](#aoe-profile-create)
@@ -111,6 +119,7 @@ Run without arguments to launch the TUI dashboard.
 * `status` — Show session status summary
 * `session` — Manage session lifecycle (start, stop, attach, etc.)
 * `group` — Manage groups for organizing sessions
+* `plugin` — Manage plugins (install, enable, disable, update)
 * `profile` — Manage profiles (separate workspaces)
 * `project` — Manage the project registry used by multi-repo session pickers
 * `worktree` — Manage git worktrees for parallel development
@@ -635,6 +644,112 @@ Move session to group
 
 * `<IDENTIFIER>` — Session ID or title
 * `<GROUP>` — Target group
+
+
+
+## `aoe plugin`
+
+Manage plugins (install, enable, disable, update)
+
+**Usage:** `aoe plugin <COMMAND>`
+
+###### **Subcommands:**
+
+* `list` — List every known plugin with trust, version, and state
+* `info` — Show one plugin's manifest details, capabilities, and grant state
+* `install` — Install a plugin from a GitHub slug (`owner/repo`) or a local directory
+* `uninstall` — Remove an installed plugin (files, grant, config entry)
+* `enable` — Enable a plugin's contributions
+* `disable` — Disable a plugin; its settings stay on disk for re-enabling
+* `update` — Update an installed plugin from its recorded source
+
+
+
+## `aoe plugin list`
+
+List every known plugin with trust, version, and state
+
+**Usage:** `aoe plugin list`
+
+
+
+## `aoe plugin info`
+
+Show one plugin's manifest details, capabilities, and grant state
+
+**Usage:** `aoe plugin info <ID>`
+
+###### **Arguments:**
+
+* `<ID>` — Plugin id, e.g. `aoe.status`
+
+
+
+## `aoe plugin install`
+
+Install a plugin from a GitHub slug (`owner/repo`) or a local directory
+
+**Usage:** `aoe plugin install [OPTIONS] <SOURCE>`
+
+###### **Arguments:**
+
+* `<SOURCE>` — `owner/repo` or a path to a directory containing aoe-plugin.toml
+
+###### **Options:**
+
+* `--yes` — Skip the interactive capability prompt and grant everything declared
+
+
+
+## `aoe plugin uninstall`
+
+Remove an installed plugin (files, grant, config entry)
+
+**Usage:** `aoe plugin uninstall <ID>`
+
+###### **Arguments:**
+
+* `<ID>` — Plugin id
+
+
+
+## `aoe plugin enable`
+
+Enable a plugin's contributions
+
+**Usage:** `aoe plugin enable <ID>`
+
+###### **Arguments:**
+
+* `<ID>` — Plugin id
+
+
+
+## `aoe plugin disable`
+
+Disable a plugin; its settings stay on disk for re-enabling
+
+**Usage:** `aoe plugin disable <ID>`
+
+###### **Arguments:**
+
+* `<ID>` — Plugin id
+
+
+
+## `aoe plugin update`
+
+Update an installed plugin from its recorded source
+
+**Usage:** `aoe plugin update [OPTIONS] <ID>`
+
+###### **Arguments:**
+
+* `<ID>` — Plugin id
+
+###### **Options:**
+
+* `--yes` — Skip the capability re-prompt when the declared set changed
 
 
 

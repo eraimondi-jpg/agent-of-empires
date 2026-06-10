@@ -14,6 +14,7 @@ pub mod github;
 pub mod hooks;
 pub mod logging;
 pub mod migrations;
+pub mod plugin;
 pub mod process;
 #[cfg(feature = "serve")]
 pub mod server;

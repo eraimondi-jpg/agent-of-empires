@@ -1,0 +1,7 @@
+# First-party status-detection plugin. Bundled with the aoe binary; lives in
+# plugins/ so it can move to its own repository without host changes.
+id = "aoe.status"
+name = "Agent Status Detection"
+version = "1.0.0"
+api_version = 1
+description = "Detects agent session status (running/waiting/idle) from tmux pane text: declarative rules for keyword-matching agents, a batched RPC worker for complex parsers."

@@ -1,0 +1,7 @@
+# First-party attention-sort plugin. Bundled with the aoe binary; lives in
+# plugins/ so it can move to its own repository without host changes.
+id = "aoe.attention"
+name = "Attention Sort"
+version = "1.0.0"
+api_version = 1
+description = "Scores sessions by how urgently they need the user (waiting > error > fresh idle > running) and publishes per-session attention metadata consumed by the session list sort."
