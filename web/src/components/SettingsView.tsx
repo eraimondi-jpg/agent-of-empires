@@ -319,11 +319,8 @@ export function SettingsView({ onClose, tab, onSelectTab, onServerAboutRefresh, 
         setSaveError("Failed to save plugin setting.");
         return false;
       }
-      const pluginId = section.slice("plugin:".length);
-      const pluginsMap = { ...((settings?.plugins ?? {}) as Record<string, { settings?: Record<string, unknown> }>) };
-      const entry = pluginsMap[pluginId] ?? {};
-      pluginsMap[pluginId] = { ...entry, settings: { ...(entry.settings ?? {}), [field]: value } };
-      updateLocal({ plugins: pluginsMap });
+      const current = (settings?.[section] ?? {}) as Record<string, unknown>;
+      updateLocal({ [section]: { ...current, [field]: value } });
       return true;
     },
     [settings, updateLocal],
@@ -508,8 +505,9 @@ export function SettingsView({ onClose, tab, onSelectTab, onServerAboutRefresh, 
         // renders regardless of schema state; per-plugin settings ride the
         // runtime schema's virtual plugin:<id> sections (#268) and are
         // global-only, so they save through the global PATCH, never a
-        // profile override.
-        const pluginsMap = (settings?.plugins ?? {}) as Record<string, { settings?: Record<string, unknown> }>;
+        // profile override. GET /api/settings projects each plugin's values
+        // (resolved defaults included) onto the same plugin:<id> keys the
+        // schema advertises, so reads and writes share one path shape.
         const pluginSections = [
           ...new Set(schema.filter((d) => d.section.startsWith("plugin:")).map((d) => d.section)),
         ];
@@ -528,7 +526,7 @@ export function SettingsView({ onClose, tab, onSelectTab, onServerAboutRefresh, 
                         <SchemaSection
                           section={section}
                           schema={schema}
-                          values={pluginsMap[pluginId]?.settings ?? {}}
+                          values={(settings?.[section] ?? {}) as Record<string, unknown>}
                           onSaveField={savePluginField}
                         />
                       </div>

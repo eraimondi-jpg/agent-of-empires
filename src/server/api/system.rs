@@ -157,7 +157,16 @@ pub async fn get_settings(
 
     match config_result {
         Ok(config) => match serde_json::to_value(&config) {
-            Ok(val) => (StatusCode::OK, Json(val)).into_response(),
+            Ok(mut val) => {
+                // Mirror plugin settings to the virtual plugin:<id> sections
+                // the schema advertises, so schema-driven clients read values
+                // at the same paths they write (#268).
+                crate::plugin::settings::project_virtual_sections(
+                    &crate::plugin::registry(),
+                    &mut val,
+                );
+                (StatusCode::OK, Json(val)).into_response()
+            }
             Err(e) => {
                 tracing::error!(target: "http.api.system", "Settings serialization failed: {}", e);
                 (
@@ -251,7 +260,15 @@ pub async fn update_settings(
                 );
             }
             match serde_json::to_value(&config) {
-                Ok(val) => (StatusCode::OK, Json(val)).into_response(),
+                Ok(mut val) => {
+                    // Same virtual-section projection as GET /api/settings,
+                    // so the echoed-back state matches the schema paths.
+                    crate::plugin::settings::project_virtual_sections(
+                        &crate::plugin::registry(),
+                        &mut val,
+                    );
+                    (StatusCode::OK, Json(val)).into_response()
+                }
                 Err(e) => {
                     tracing::error!(target: "http.api.system", "Settings serialization failed: {}", e);
                     (

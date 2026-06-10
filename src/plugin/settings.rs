@@ -89,6 +89,35 @@ pub fn expand_virtual_sections(patch: &mut Value) {
     }
 }
 
+/// The inverse of [`expand_virtual_sections`], for read responses: mirror
+/// every active plugin's persisted settings table to a top-level
+/// `plugin:<id>` key, resolved defaults filling unset keys. A schema-driven
+/// client then finds values exactly at the paths
+/// `GET /api/settings/schema` advertises.
+pub fn project_virtual_sections(registry: &PluginRegistry, config_json: &mut Value) {
+    let Some(root) = config_json.as_object_mut() else {
+        return;
+    };
+    for plugin in registry.active() {
+        if plugin.manifest.settings.is_empty() {
+            continue;
+        }
+        let mut section = serde_json::Map::new();
+        for setting in &plugin.manifest.settings {
+            let value = plugin
+                .settings
+                .get(&setting.key)
+                .map(toml_to_json)
+                .or_else(|| {
+                    resolve(registry, plugin.id(), &setting.key).map(|resolved| resolved.value)
+                })
+                .unwrap_or(Value::Null);
+            section.insert(setting.key.clone(), value);
+        }
+        root.insert(virtual_section(plugin.id()), Value::Object(section));
+    }
+}
+
 /// Core schema plus the descriptors contributed by every active plugin.
 pub fn runtime_schema(registry: &PluginRegistry) -> Vec<FieldDescriptor> {
     let mut all = schema();
