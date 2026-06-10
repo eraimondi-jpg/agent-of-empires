@@ -1435,6 +1435,7 @@ fn build_router(state: Arc<AppState>) -> Router {
             get(api::get_settings).patch(api::update_settings),
         )
         .route("/api/settings/schema", get(api::get_settings_schema))
+        .route("/api/settings/resolved", get(api::get_settings_resolved))
         .route(
             "/api/app-state/web-tour-seen",
             post(api::mark_web_tour_seen),

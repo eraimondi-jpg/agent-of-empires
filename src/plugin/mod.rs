@@ -11,6 +11,7 @@ pub mod grants;
 pub mod install;
 pub mod lockfile;
 pub mod registry;
+pub mod settings;
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};

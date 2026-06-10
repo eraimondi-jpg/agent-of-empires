@@ -348,6 +348,11 @@ impl SettingsView {
             push_tab(&mut rows, SettingsCategory::Telemetry);
         }
         push_tab(&mut rows, SettingsCategory::Logging);
+        // Plugin settings are global-only in v1; the tab only renders fields
+        // under Global scope, so hide it elsewhere.
+        if scope == SettingsScope::Global {
+            push_tab(&mut rows, SettingsCategory::Plugins);
+        }
 
         rows
     }

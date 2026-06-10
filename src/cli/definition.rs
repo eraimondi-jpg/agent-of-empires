@@ -25,6 +25,7 @@ use super::send::SendArgs;
 #[cfg(feature = "serve")]
 use super::serve::ServeArgs;
 use super::session::SessionCommands;
+use super::settings_cmd::SettingsCommands;
 use super::sounds::SoundsCommands;
 use super::status::StatusArgs;
 use super::telemetry::TelemetryCommands;
@@ -115,6 +116,12 @@ pub enum Commands {
     Plugin {
         #[command(subcommand)]
         command: PluginCommands,
+    },
+
+    /// Inspect settings (resolution provenance, defaults)
+    Settings {
+        #[command(subcommand)]
+        command: SettingsCommands,
     },
 
     /// Manage profiles (separate workspaces)
@@ -229,6 +236,7 @@ pub const CLI_COMMAND_NAMES: &[&str] = &[
     "session",
     "group",
     "plugin",
+    "settings",
     "profile",
     "project",
     "worktree",
@@ -270,6 +278,7 @@ pub fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Session { .. } => "session",
         Commands::Group { .. } => "group",
         Commands::Plugin { .. } => "plugin",
+        Commands::Settings { .. } => "settings",
         Commands::Profile { .. } => "profile",
         Commands::Project { .. } => "project",
         Commands::Worktree { .. } => "worktree",

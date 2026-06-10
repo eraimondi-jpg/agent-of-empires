@@ -3892,8 +3892,8 @@ mod tests {
             std::env::set_var("XDG_CONFIG_HOME", tmp.path().join(".config"));
         }
         let session_id = "attached-codex-1";
-        let dir = super::crate::process::worker_registry::workers_dir().unwrap();
-        let record = super::crate::process::worker_registry::WorkerRecord::new(
+        let dir = crate::process::worker_registry::workers_dir().unwrap();
+        let record = crate::process::worker_registry::WorkerRecord::new(
             session_id.into(),
             std::process::id(),
             dir.join(format!("{session_id}.sock")),
@@ -3906,7 +3906,7 @@ mod tests {
             None,
             None,
         );
-        super::crate::process::worker_registry::save(&record).unwrap();
+        crate::process::worker_registry::save(&record).unwrap();
 
         let sink = VecSink::new();
         let sup = Supervisor::new(sink.clone());
@@ -3933,7 +3933,7 @@ mod tests {
             1,
             "no SessionCleared expected for /clear on codex"
         );
-        super::crate::process::worker_registry::delete(session_id).ok();
+        crate::process::worker_registry::delete(session_id).ok();
     }
 
     /// Legacy registry records (written before the `agent_key` field
@@ -3949,11 +3949,11 @@ mod tests {
             std::env::set_var("XDG_CONFIG_HOME", tmp.path().join(".config"));
         }
         let session_id = "legacy-claude-1";
-        let dir = super::crate::process::worker_registry::workers_dir().unwrap();
+        let dir = crate::process::worker_registry::workers_dir().unwrap();
         // Hand-craft a legacy record: pre-`agent_key` schema (empty
         // string after serde default).
         let legacy = serde_json::json!({
-            "runner_version": super::crate::process::worker_registry::RUNNER_VERSION,
+            "runner_version": crate::process::worker_registry::RUNNER_VERSION,
             "session_id": session_id,
             "pid": std::process::id(),
             "socket_path": dir.join(format!("{session_id}.sock")),
@@ -3979,7 +3979,7 @@ mod tests {
         let frames = sink.frames.lock().unwrap().clone();
         assert_eq!(frames.len(), 2);
         assert!(matches!(&frames[1].2, Event::SessionCleared));
-        super::crate::process::worker_registry::delete(session_id).ok();
+        crate::process::worker_registry::delete(session_id).ok();
     }
 
     /// A regular user prompt must not emit `SessionCleared`. Sanity

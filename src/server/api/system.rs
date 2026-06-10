@@ -216,9 +216,17 @@ pub async fn update_settings(
     // truth): unknown section/field -> 400, bad value -> 400. `PATCH
     // /api/settings` is already elevation-gated by the auth middleware, so any
     // field reaching here is treated as elevated.
-    if let Err(rej) = validate_patch(&body, Scope::Global, true) {
+    // Runtime schema: core sections plus every active plugin's settings, so
+    // plugin fields validate through the same gate (#268).
+    let runtime = crate::plugin::settings::runtime_schema(&crate::plugin::registry());
+    if let Err(rej) =
+        crate::session::settings_schema::validate_patch_with(&runtime, &body, Scope::Global, true)
+    {
         return reject_response(rej);
     }
+    // Virtual `plugin:<id>` sections become the real `plugins.<id>.settings`
+    // nesting before the merge.
+    crate::plugin::settings::expand_virtual_sections(&mut body);
 
     let result = tokio::task::spawn_blocking(move || {
         let config = crate::session::Config::load_or_warn();
@@ -280,7 +288,18 @@ pub async fn update_settings(
 /// secrets: descriptors are pure metadata (labels, widgets, validation, write
 /// policy), so this needs no elevation, only normal authentication.
 pub async fn get_settings_schema() -> Json<Vec<crate::session::settings_schema::FieldDescriptor>> {
-    Json(crate::session::settings_schema::schema())
+    Json(crate::plugin::settings::runtime_schema(
+        &crate::plugin::registry(),
+    ))
+}
+
+/// `GET /api/settings/resolved` returns every active plugin setting with its
+/// resolution provenance (user value, cross-plugin default override, manifest
+/// default, widget default), the server-side twin of `aoe settings explain`.
+pub async fn get_settings_resolved() -> Json<Vec<crate::plugin::settings::ResolvedSetting>> {
+    Json(crate::plugin::settings::resolve_all(
+        &crate::plugin::registry(),
+    ))
 }
 
 /// Body of `PATCH /api/theme`. Either field may be omitted to leave it

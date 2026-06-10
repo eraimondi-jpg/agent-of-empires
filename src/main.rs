@@ -310,6 +310,7 @@ async fn main() -> Result<()> {
         Some(Commands::Session { command }) => cli::session::run(&profile, command).await,
         Some(Commands::Group { command }) => cli::group::run(&profile, command).await,
         Some(Commands::Plugin { command }) => cli::plugin::run(command),
+        Some(Commands::Settings { command }) => cli::settings_cmd::run(command),
         Some(Commands::Profile { command }) => cli::profile::run(command).await,
         Some(Commands::Project { command }) => {
             cli::project::run(&profile, profile_explicit, command).await
