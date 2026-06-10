@@ -141,7 +141,7 @@ match Cli::from_arg_matches(&matches) {
 Rules:
 
 - Name conflicts: core wins, always. A manifest command colliding with a core path is rejected at manifest load with a visible error, not shadowed.
-- A plugin command declares a `path` (`["review"]` for a top-level verb, `["session", "archive"]` to slot under an existing group). Top-level placement requires the `cli.top-level` capability so the install prompt surfaces it.
+- A plugin command declares a `path` (`["review"]` for a top-level verb, `["session", "archive"]` to slot under an existing group). Top-level placement requires the `cli-top-level` capability so the install prompt surfaces it.
 - `aoe plugin` is reserved for management: `install`, `list`, `enable`, `disable`, `info`.
 - Telemetry: the existing command-name allowlist tables do not enumerate plugin commands; plugin invocations are recorded generically as `plugin:<id>:<command>`. Core tables stay as they are.
 - Disabling a plugin removes its grafted subcommands on the next invocation (the tree is built per-invocation from the enabled set), satisfying acceptance criterion 3 for the CLI surface.
@@ -220,7 +220,7 @@ This covers the keyword-matching majority of agents with zero plugin code runnin
 
 The response carries per-snapshot results or per-snapshot errors, so one bad snapshot does not fail its siblings. Host policy: per-batch timeout with cached-previous-status fallback, max bytes per snapshot and per batch, split-and-quarantine when a specific snapshot repeatedly poisons the batch, and supervisor respawn budgets when the worker itself is sick. Batching was chosen over per-session calls because the failure domain is the plugin process either way (per-session calls stall behind the same hung event loop) and batching gives one timeout budget, one health-accounting unit, and shared parser state per tick.
 
-Pane text only flows to a plugin that declared and was granted `pane.read`.
+Pane text only flows to a plugin that declared and was granted `pane-read`.
 
 ## D8. Security model, stated honestly
 
@@ -235,7 +235,7 @@ Grants are persisted pinned to a manifest hash:
 [plugin_grants."example.plugin"]
 manifest_hash = "sha256:..."
 granted_at = "..."
-capabilities = ["events.subscribe", "pane.read"]
+capabilities = ["events-subscribe", "pane-read"]
 ```
 
 A plugin update that changes its declared capability set no longer matches the stored hash and re-prompts.
@@ -246,17 +246,17 @@ Sized to what the first three plugins (status detection, attention sort, triage)
 
 | Capability | Grants |
 |---|---|
-| `sessions.read` | read the session list and instance fields |
-| `sessions.meta-write` | write the plugin's own `plugin_meta` namespace |
-| `pane.read` | receive captured tmux pane text |
-| `events.subscribe` | subscribe to declared bus topics |
-| `events.publish` | publish under `plugin.<id>.*` topics |
-| `process.spawn` | ask the host to spawn a subprocess |
-| `net.fetch` | outbound HTTP through the host |
-| `fs.read` / `fs.write` | scoped filesystem access through host RPCs |
-| `agent.reconcile` | contribute hook/pane status reconciliation |
-| `agent.hooks` | contribute agent hook install/uninstall declarations |
-| `cli.top-level` | place a CLI command at the top level of the tree |
+| `sessions-read` | read the session list and instance fields |
+| `sessions-meta-write` | write the plugin's own `plugin_meta` namespace |
+| `pane-read` | receive captured tmux pane text |
+| `events-subscribe` | subscribe to declared bus topics |
+| `events-publish` | publish under `plugin.<id>.*` topics |
+| `process-spawn` | ask the host to spawn a subprocess |
+| `net-fetch` | outbound HTTP through the host |
+| `fs-read` / `fs-write` | scoped filesystem access through host RPCs |
+| `agent-reconcile` | contribute hook/pane status reconciliation |
+| `agent-hooks` | contribute agent hook install/uninstall declarations |
+| `cli-top-level` | place a CLI command at the top level of the tree |
 
 Tier 0 contributions (settings, keybinds, themes, declarative rules) are implicit and need no runtime capability. A future "security plugin" that gates other plugins' capability use is out of scope for v1; the manifest reserves a `gates` field name for it.
 

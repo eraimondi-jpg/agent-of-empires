@@ -188,6 +188,53 @@ widget = { kind = "toggle" }
 }
 
 #[test]
+fn malformed_override_targets_dup_paths_and_double_defaults_are_rejected() {
+    let all = invalid_messages(
+        r#"
+id = "aoe.morebroken"
+name = "More Broken"
+version = "1.0.0"
+api_version = 1
+capabilities = ["cli-top-level", "pane-read"]
+
+[[setting_defaults]]
+target = "no-dot-separator"
+value = 1
+priority = 10
+
+[[commands]]
+path = ["review"]
+about = "first"
+rpc_method = "cli.review"
+
+[[commands]]
+path = ["review"]
+about = "second copy"
+rpc_method = "cli.review2"
+
+[[status_detection]]
+agent = "custom"
+mode = "declarative"
+
+[[status_detection.rules]]
+status = "idle"
+default = true
+
+[[status_detection.rules]]
+status = "running"
+default = true
+
+[runtime]
+entrypoint = "worker"
+"#,
+    )
+    .join("\n");
+    assert!(all.contains("setting_defaults target"), "{all}");
+    assert!(all.contains("duplicate command path"), "{all}");
+    assert!(all.contains("more than one default rule"), "{all}");
+}
+
+#[test]
 fn unknown_manifest_fields_are_rejected() {
     let err = PluginManifest::from_toml_str(
         r#"
