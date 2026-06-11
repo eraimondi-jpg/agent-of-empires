@@ -138,7 +138,13 @@ impl PluginHost {
     }
 
     fn ensure_worker(&self, plugin_id: &str) -> Result<Arc<Worker>> {
-        if let Some(worker) = self.workers.lock().expect("workers lock").get(plugin_id) {
+        // Single-flight: the workers lock is held across check, spawn, and
+        // insert, so two concurrent first calls cannot both observe "no
+        // worker" and spawn duplicates (each burning respawn budget). The
+        // spawn itself is per-plugin rare and fast; holding the map lock
+        // through it is the simple correct shape.
+        let mut workers = self.workers.lock().expect("workers lock");
+        if let Some(worker) = workers.get(plugin_id) {
             if worker.alive.load(Ordering::SeqCst) {
                 return Ok(worker.clone());
             }
@@ -161,11 +167,11 @@ impl PluginHost {
         }
         let (worker, stdout) = spawn_worker(plugin)?;
         let worker = Arc::new(worker);
+        workers.insert(plugin_id.to_string(), worker.clone());
+        drop(workers);
+        // The reader can call mark_dead (which takes the workers lock) the
+        // moment it starts, so it must spawn after the lock is released.
         start_reader(&worker, stdout);
-        self.workers
-            .lock()
-            .expect("workers lock")
-            .insert(plugin_id.to_string(), worker.clone());
         Ok(worker)
     }
 }
@@ -306,11 +312,12 @@ fn start_reader(worker: &Arc<Worker>, stdout: std::process::ChildStdout) {
             route_message(&worker, msg);
         }
         if let Some(worker) = weak.upgrade() {
-            worker.alive.store(false, Ordering::SeqCst);
-            let mut pending = worker.pending.lock().expect("pending lock");
-            for (_, tx) in pending.drain() {
-                let _ = tx.send(Err("worker closed stdout".to_string()));
-            }
+            // Full teardown, not just a flag flip: a worker that closed
+            // stdout without exiting would otherwise keep running as a
+            // stray process once a replacement is spawned. mark_dead kills
+            // and reaps the child, removes it from the map, and drains
+            // pending callers.
+            host().mark_dead(&worker);
             debug!(target: "plugin", plugin = %worker.plugin_id, "worker stdout closed");
         }
     });
