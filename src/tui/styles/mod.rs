@@ -122,7 +122,26 @@ fn plugin_theme_files(existing: &[(String, PathBuf)]) -> Vec<(String, PathBuf)> 
             continue;
         };
         for theme in &plugin.manifest.themes {
-            let path = root.join(&theme.file);
+            // The manifest path is untrusted: refuse anything resolving
+            // outside the plugin's install root (absolute paths, .., or
+            // symlink escapes would otherwise let a manifest read arbitrary
+            // host files as "themes"). Canonicalize both sides so symlinks
+            // cannot bypass the prefix check.
+            let Ok(path) = root.join(&theme.file).canonicalize() else {
+                continue;
+            };
+            let Ok(canonical_root) = root.canonicalize() else {
+                continue;
+            };
+            if !path.starts_with(&canonical_root) {
+                tracing::warn!(
+                    target: "plugin",
+                    plugin = plugin.id(),
+                    file = %theme.file,
+                    "theme path escapes the plugin root; skipped"
+                );
+                continue;
+            }
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
