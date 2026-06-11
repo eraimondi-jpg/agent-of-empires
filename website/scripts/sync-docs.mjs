@@ -196,6 +196,13 @@ const PAGES = [
       "How to add a configuration setting with the single-source schema that drives the TUI, web dashboard, and server.",
   },
   {
+    source: "docs/development/writing-plugins.md",
+    dest: "docs/development/writing-plugins.md",
+    title: "Writing Plugins",
+    description:
+      "Practical guide to building an AoE plugin: manifest schema, per-surface contributions, the JSON-RPC worker runtime, and shipping via discovery and the featured index.",
+  },
+  {
     source: "docs/development/logging.md",
     dest: "docs/development/logging.md",
     title: "Logging",
@@ -372,6 +379,7 @@ const URL_MAP = {
   "docs/development.md": "/docs/development/",
   "docs/development/adding-agents.md": "/docs/development/adding-agents/",
   "docs/development/adding-settings.md": "/docs/development/adding-settings/",
+  "docs/development/writing-plugins.md": "/docs/development/writing-plugins/",
   "docs/development/logging.md": "/docs/development/logging/",
   "docs/development/playwright.md": "/docs/development/playwright/",
   "docs/development/releases.md": "/docs/development/releases/",

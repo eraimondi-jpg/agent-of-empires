@@ -79,6 +79,7 @@ export const docsNav: NavSection[] = [
       { title: "Development", href: "/docs/development/" },
       { title: "Adding a New Agent", href: "/docs/development/adding-agents/" },
       { title: "Adding a Setting", href: "/docs/development/adding-settings/" },
+      { title: "Writing Plugins", href: "/docs/development/writing-plugins/" },
       { title: "Logging", href: "/docs/development/logging/" },
       { title: "Playwright + Vitest testing", href: "/docs/development/playwright/" },
       { title: "Releases", href: "/docs/development/releases/" },

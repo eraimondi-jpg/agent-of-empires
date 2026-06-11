@@ -158,5 +158,10 @@ A plugin is a directory with an `aoe-plugin.toml` manifest declaring its
 contributions (settings, CLI commands, TUI keybinds, themes, status
 detection rules) and, when it needs to run code, a `[runtime]` entrypoint:
 an executable speaking newline-delimited JSON-RPC on stdio, in any language.
-The manifest schema and capability list live in the `aoe-plugin-api` crate;
-the full design is in `docs/development/internals/plugin-system.md`.
+The manifest schema and capability list live in the `aoe-plugin-api` crate.
+
+Start with the [Writing Plugins guide](development/writing-plugins.md), which
+walks every surface (settings, CLI, TUI keybinds, themes, status detection,
+UI contributions) with working manifest snippets and documents the worker
+protocol. A ready-to-copy skeleton lives in `contrib/plugin-template/`; the
+architecture rationale is in `docs/development/internals/plugin-system.md`.

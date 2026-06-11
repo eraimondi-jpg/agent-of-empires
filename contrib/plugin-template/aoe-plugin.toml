@@ -1,0 +1,68 @@
+# Agent of Empires plugin template.
+#
+# Copy this directory somewhere, rename the id (and this comment), then
+# install it locally:
+#
+#   aoe plugin install ./plugin-template
+#
+# Schema reference: aoe-plugin-api/src/manifest.rs in the AoE repository.
+# Developer guide: docs/development/writing-plugins.md.
+
+# Lowercase dot-separated segments; letters, digits, and hyphens only.
+# The id namespaces the plugin's config table, plugin_meta slot, event
+# topics, and canonical action names.
+id = "example.template"
+name = "Plugin Template"
+version = "0.1.0"
+# Manifest schema version this manifest targets; the host supports 1.
+api_version = 1
+description = "Minimal example plugin: one setting, one keybound action, one dashboard card, and a Node worker."
+
+# Runtime capabilities (kebab-case, see aoe-plugin-api/src/capability.rs).
+# This template needs none: declarative contributions are implicit, and
+# ui.state.set / ui.notify are authorized by the declared [[ui]]
+# contributions rather than a capability.
+capabilities = []
+
+# One setting, rendered generically on the TUI and web settings surfaces
+# and stored under [plugins."example.template".settings] in config.toml.
+# The v1 host API has no settings-read RPC, so the worker does not see it;
+# it exists to show the contribution shape.
+[[settings]]
+key = "example_text"
+label = "Example text"
+description = "Demonstrates a plugin setting; the template worker does not read it."
+default = "hello"
+
+[settings.widget]
+kind = "text"
+
+# A named action handled by the worker (rpc_method is the JSON-RPC method
+# the host calls), plus a default chord for it. Core chords always win;
+# bare j/k/h/l/G/</>/{/} are reserved for navigation, and bare lowercase
+# chords never fire in strict-hotkeys mode, so prefer ctrl+ chords.
+[[actions]]
+name = "refresh_card"
+label = "Refresh template card"
+rpc_method = "template.refresh"
+
+[[keybinds]]
+action = "refresh_card"
+chord = "ctrl+t"
+priority = 0
+
+# One UI contribution: a card on the global overview surfaces
+# (dashboard-card is a global slot; payload kind "blocks"). The worker
+# pushes its content through the ui.state.set host RPC; the host renders.
+[[ui]]
+id = "template_card"
+slot = "dashboard-card"
+title = "Plugin Template"
+priority = 0
+
+# The Tier 1 worker: an executable (shebang + executable bit for scripts)
+# speaking newline-delimited JSON-RPC 2.0 on stdio, spawned lazily with
+# the plugin root as working directory. Required because this manifest
+# declares actions and ui contributions.
+[runtime]
+entrypoint = "worker.mjs"
