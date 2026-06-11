@@ -175,6 +175,67 @@ default = false
 
 #[test]
 #[serial]
+fn test_core_setting_default_override_applies_and_explains() {
+    let h = TuiTestHarness::new("plugin_core_override");
+    let source = tempfile::tempdir().expect("plugin source dir");
+    std::fs::write(
+        source.path().join("aoe-plugin.toml"),
+        r#"
+id = "acme.coreover"
+name = "Core Override Fixture"
+version = "1.0.0"
+api_version = 1
+
+[[setting_defaults]]
+target = "session.yolo_mode_default"
+value = true
+priority = 40
+reason = "fixture flips a core default"
+"#,
+    )
+    .unwrap();
+    let install = h.run_cli(&[
+        "plugin",
+        "install",
+        source.path().to_str().unwrap(),
+        "--yes",
+    ]);
+    assert!(
+        install.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+
+    let explain = h.run_cli(&["settings", "explain", "session.yolo_mode_default"]);
+    assert!(
+        explain.status.success(),
+        "explain failed: {}",
+        String::from_utf8_lossy(&explain.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&explain.stdout);
+    assert!(
+        stdout.contains("default override by plugin acme.coreover"),
+        "core override must win and be attributed:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("built-in default"),
+        "chain must show the losing built-in default:\n{stdout}"
+    );
+
+    // The override stops applying the moment the plugin is disabled.
+    h.run_cli(&["plugin", "disable", "acme.coreover"]);
+    let explain = h.run_cli(&["settings", "explain", "session.yolo_mode_default"]);
+    let stdout = String::from_utf8_lossy(&explain.stdout);
+    assert!(
+        stdout.contains("resolved from: built-in default"),
+        "disabled plugin must not override:\n{stdout}"
+    );
+
+    h.run_cli(&["plugin", "uninstall", "acme.coreover"]);
+}
+
+#[test]
+#[serial]
 fn test_outdated_reports_path_source_drift() {
     let h = TuiTestHarness::new("plugin_outdated");
     let source = tempfile::tempdir().expect("plugin source dir");

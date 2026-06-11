@@ -32,6 +32,7 @@ fn source_label(source: &SettingSource) -> String {
         }
         SettingSource::ManifestDefault => "owning plugin's manifest default".to_string(),
         SettingSource::SchemaDefault => "widget default".to_string(),
+        SettingSource::CoreDefault => "built-in default".to_string(),
     }
 }
 
@@ -50,12 +51,17 @@ fn run_explain(key: Option<&str>) -> Result<()> {
             Ok(())
         }
         Some(key) => {
-            let (plugin_id, setting_key) = key
-                .rsplit_once('.')
-                .ok_or_else(|| anyhow!("key must be <plugin-id>.<key>, got {key:?}"))?;
-            let r = resolve(&registry, plugin_id, setting_key).ok_or_else(|| {
-                anyhow!("no active plugin declares {key:?} (is the plugin enabled and granted?)")
+            let (head, setting_key) = key.rsplit_once('.').ok_or_else(|| {
+                anyhow!("key must be <plugin-id>.<key> or <section>.<field>, got {key:?}")
             })?;
+            let r = crate::plugin::settings::resolve_core(&registry, head, setting_key)
+                .or_else(|| resolve(&registry, head, setting_key))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "{key:?} is neither a core setting nor a setting of an active plugin \
+                         (is the plugin enabled and granted?)"
+                    )
+                })?;
             println!("{} = {}", r.key, r.value);
             println!("resolved from: {}", source_label(&r.source));
             println!("\nresolution chain (first wins):");

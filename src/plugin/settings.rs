@@ -176,6 +176,8 @@ pub enum SettingSource {
     ManifestDefault,
     /// The widget's zero value; nothing else supplied one.
     SchemaDefault,
+    /// The built-in default of a core setting (`Config::default()`).
+    CoreDefault,
 }
 
 /// One candidate in the resolution chain, winners and losers alike.
@@ -212,9 +214,10 @@ fn toml_to_json(value: &toml::Value) -> Value {
     serde_json::to_value(value).unwrap_or(Value::Null)
 }
 
-/// Resolve every setting of every active plugin.
+/// Resolve every setting of every active plugin, plus every CORE setting an
+/// active plugin overrides the default of.
 pub fn resolve_all(registry: &PluginRegistry) -> Vec<ResolvedSetting> {
-    registry
+    let mut all: Vec<ResolvedSetting> = registry
         .active()
         .flat_map(|p| {
             p.manifest
@@ -223,7 +226,76 @@ pub fn resolve_all(registry: &PluginRegistry) -> Vec<ResolvedSetting> {
                 .map(|s| resolve_one(registry, p.id(), s))
                 .collect::<Vec<_>>()
         })
-        .collect()
+        .collect();
+    let mut core_targets: Vec<(String, String)> = registry
+        .active()
+        .flat_map(|p| p.manifest.setting_defaults.iter())
+        .filter_map(|ov| {
+            let (section, field) = ov.target.rsplit_once('.')?;
+            super::core_overrides::is_core_field(section, field)
+                .then(|| (section.to_string(), field.to_string()))
+        })
+        .collect();
+    core_targets.sort();
+    core_targets.dedup();
+    for (section, field) in core_targets {
+        if let Some(resolved) = resolve_core(registry, &section, &field) {
+            all.push(resolved);
+        }
+    }
+    all
+}
+
+/// Resolve a CORE setting's default chain: explicit user value (an on-disk
+/// value differing from the built-in default), then plugin default overrides
+/// by priority, then the built-in default. `None` when the key is not a core
+/// schema field.
+pub fn resolve_core(
+    registry: &PluginRegistry,
+    section: &str,
+    field: &str,
+) -> Option<ResolvedSetting> {
+    if !super::core_overrides::is_core_field(section, field) {
+        return None;
+    }
+    let builtin = super::core_overrides::builtin_default(section, field);
+    let mut candidates: Vec<SettingCandidate> = Vec::new();
+
+    let on_disk = crate::session::config::config_path()
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|raw| toml::from_str::<toml::Table>(&raw).ok())
+        .and_then(|t| t.get(section)?.get(field).cloned());
+    if let Some(value) = on_disk {
+        if builtin.as_ref() != Some(&value) {
+            candidates.push(SettingCandidate {
+                source: SettingSource::UserConfig,
+                value: toml_to_json(&value),
+            });
+        }
+    }
+
+    for (plugin, priority, value) in
+        super::core_overrides::core_override_candidates(registry, section, field)
+    {
+        candidates.push(SettingCandidate {
+            source: SettingSource::PluginDefault { plugin, priority },
+            value: toml_to_json(&value),
+        });
+    }
+
+    candidates.push(SettingCandidate {
+        source: SettingSource::CoreDefault,
+        value: builtin.as_ref().map(toml_to_json).unwrap_or(Value::Null),
+    });
+
+    let winner = &candidates[0];
+    Some(ResolvedSetting {
+        key: format!("{section}.{field}"),
+        value: winner.value.clone(),
+        source: winner.source.clone(),
+        candidates,
+    })
 }
 
 /// Resolve a single `<plugin-id>.<key>`, or `None` if no active plugin

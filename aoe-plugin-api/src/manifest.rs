@@ -64,12 +64,13 @@ pub enum SettingWidget {
     Select { options: Vec<String> },
 }
 
-/// Override of another plugin's setting default, resolved by priority.
+/// Override of another setting's default, resolved by priority.
 /// The user's own config value always wins over any override.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingDefaultOverride {
-    /// Fully qualified target, `<plugin-id>.<key>`.
+    /// Fully qualified target: another plugin's setting (`<plugin-id>.<key>`)
+    /// or a core setting (`<section>.<field>`, e.g. `session.auto_archive`).
     pub target: String,
     pub value: toml::Value,
     pub priority: i32,

@@ -98,11 +98,15 @@ aoe plugin hash ./my-plugin
 A plugin's settings render in the normal settings surfaces (TUI Settings
 under Plugins, web Settings Plugins tab) with no extra UI code, and are
 stored under `[plugins."<id>".settings]` in `config.toml`. Plugins may also
-override another plugin's setting defaults by declared priority; your own
-config value always wins. Inspect any resolution with:
+override setting DEFAULTS by declared priority, both another plugin's
+settings and core settings (`target = "session.auto_archive"` style); a
+value you chose yourself always wins, and a core override only applies
+while the field still sits at its built-in default. Inspect any resolution
+with:
 
 ```sh
-aoe settings explain <plugin-id>.<key>
+aoe settings explain <plugin-id>.<key>     # plugin setting
+aoe settings explain session.yolo_mode_default   # core setting
 ```
 
 ## Writing a plugin

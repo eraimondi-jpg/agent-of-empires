@@ -8,6 +8,7 @@
 //! workers. See `docs/development/internals/plugin-system.md`.
 
 pub mod cli_graft;
+pub mod core_overrides;
 pub mod featured;
 pub mod grants;
 pub mod host;
@@ -103,6 +104,7 @@ pub fn registry() -> Arc<PluginRegistry> {
 /// disabled, uninstalled, or capability-changed plugin cannot keep its old
 /// worker and grant set alive; active plugins respawn on their next call.
 pub fn reload_registry() -> Arc<PluginRegistry> {
+    core_overrides::invalidate();
     let config = crate::session::Config::load_or_warn();
     let reg = Arc::new(PluginRegistry::load(&config));
     *REGISTRY.write().expect("plugin registry lock") = Some(reg.clone());

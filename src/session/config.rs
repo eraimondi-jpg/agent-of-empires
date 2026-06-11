@@ -2069,12 +2069,15 @@ pub(crate) fn config_path() -> Result<PathBuf> {
 impl Config {
     pub fn load() -> Result<Self> {
         let path = config_path()?;
-        if !path.exists() {
-            return Ok(Config::default());
-        }
-
-        let content = fs::read_to_string(&path)?;
-        let mut config: Config = toml::from_str(&content)?;
+        let mut table: toml::Table = if path.exists() {
+            toml::from_str(&fs::read_to_string(&path)?)?
+        } else {
+            toml::Table::new()
+        };
+        // Plugin-contributed core DEFAULT overrides land on the raw table
+        // before typing, and only where the user never chose a value.
+        crate::plugin::core_overrides::apply_to_table(&mut table);
+        let mut config: Config = table.try_into()?;
         config.normalize();
         Ok(config)
     }
@@ -2128,7 +2131,11 @@ pub fn load_config() -> Result<Option<Config>> {
 
 pub fn save_config(config: &Config) -> Result<()> {
     let path = config_path()?;
-    let content = toml::to_string_pretty(config)?;
+    let mut table = toml::Table::try_from(config)?;
+    // Plugin core-default overrides were baked in at load; never persist
+    // them as if the user chose them.
+    crate::plugin::core_overrides::strip_from_table(&mut table);
+    let content = toml::to_string_pretty(&table)?;
     super::atomic_write(&path, content.as_bytes())?;
     Ok(())
 }
