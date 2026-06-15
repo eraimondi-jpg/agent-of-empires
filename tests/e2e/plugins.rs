@@ -275,6 +275,72 @@ api_version = 1
     h.run_cli(&["plugin", "uninstall", "acme.outdated"]);
 }
 
+/// Regression for the grafted-command dispatch bug: a plugin CLI command is
+/// unknown to the core clap derive, which parses it as `command: None`. The
+/// dispatcher must claim it and route to the worker instead of falling
+/// through to the bare-`aoe` TUI launch ("requires an interactive TTY").
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_grafted_cli_command_dispatches_to_worker() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let h = TuiTestHarness::new("plugin_graft_dispatch");
+    let source = tempfile::tempdir().expect("plugin source dir");
+    std::fs::write(
+        source.path().join("aoe-plugin.toml"),
+        r#"
+id = "acme.cmd"
+name = "Command Fixture"
+version = "1.0.0"
+api_version = 1
+
+[[commands]]
+path = ["acmedemo", "ping"]
+about = "ping the worker"
+rpc_method = "demo.ping"
+
+[runtime]
+entrypoint = "worker.sh"
+"#,
+    )
+    .unwrap();
+    // Portable ndjson JSON-RPC worker: echo a result with the request's id.
+    let worker = source.path().join("worker.sh");
+    std::fs::write(
+        &worker,
+        "#!/bin/sh\nwhile IFS= read -r line; do\n  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9]*\\).*/\\1/p')\n  [ -z \"$id\" ] && continue\n  printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":\"GRAFTED_OK\"}\\n' \"$id\"\ndone\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let install = h.run_cli(&[
+        "plugin",
+        "install",
+        source.path().to_str().unwrap(),
+        "--yes",
+    ]);
+    assert!(
+        install.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+
+    let output = h.run_cli(&["acmedemo", "ping"]);
+    assert!(
+        output.status.success(),
+        "grafted command did not dispatch (fell through to TUI?): {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("GRAFTED_OK"),
+        "worker result missing from grafted command output:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    h.run_cli(&["plugin", "uninstall", "acme.cmd"]);
+}
+
 #[test]
 #[serial]
 fn test_builtin_worker_answers_status_batch() {
