@@ -16,3 +16,11 @@
 # [[featured.releases]]
 # version = "1.0.0"
 # tree_hash = "sha256:..."
+
+[[featured]]
+id = "agent-of-empires.github"
+slug = "agent-of-empires/plugin-github"
+
+[[featured.releases]]
+version = "0.1.0"
+tree_hash = "sha256:5b027e7576c75c74342a640d4069fd0d2159132a1b6befbbd679dcd49328d7f4"
