@@ -242,6 +242,99 @@ describe("ToolCards profile-gated dispatch (claude)", () => {
     );
     expect(container.textContent).toContain("checking deploy");
   });
+
+  it("routes ToolSearch to the harness card under the claude profile", () => {
+    const { container } = render(
+      <Wrap toolKey="claude">
+        <ToolCard tool={fixtures.toolSearch} result={undefined} />
+      </Wrap>,
+    );
+    expect(container.textContent).toContain("tool search");
+    expect(container.textContent).toContain("select:Read,Edit");
+  });
+
+  it("routes Monitor to the harness card under the claude profile", () => {
+    const { container } = render(
+      <Wrap toolKey="claude">
+        <ToolCard tool={fixtures.monitor} result={undefined} />
+      </Wrap>,
+    );
+    expect(container.textContent).toContain("monitor");
+    expect(container.textContent).toContain("errors in deploy.log");
+    expect(container.textContent).toContain("persistent");
+  });
+
+  it("routes TaskStop to the harness card under the claude profile", () => {
+    const { container } = render(
+      <Wrap toolKey="claude">
+        <ToolCard tool={fixtures.taskStop} result={undefined} />
+      </Wrap>,
+    );
+    expect(container.textContent).toContain("task stop");
+    expect(container.textContent).toContain("task-abc123");
+  });
+});
+
+describe("ToolCards harness-tool gating (non-claude)", () => {
+  it("does not fire the harness card for a coincidental Monitor name under codex", () => {
+    const { container } = render(
+      <Wrap toolKey="codex">
+        <ToolCard tool={fixtures.monitor} result={undefined} />
+      </Wrap>,
+    );
+    // Generic fallback: header shows the raw name + "other" kind, and the
+    // collapsed body keeps the description (`errors in deploy.log`) out of
+    // the DOM. The harness card would have surfaced it in the header.
+    expect(container.textContent).toContain("Monitor");
+    expect(container.textContent).not.toContain("errors in deploy.log");
+  });
+});
+
+describe("ToolCards harness-tool details", () => {
+  it("shows a timeout chip and the expanded body for a non-persistent Monitor", () => {
+    const tool = makeToolCall({
+      id: "monitor-timeout",
+      name: "Monitor",
+      kind: "other",
+      args_preview: JSON.stringify({
+        description: "watch the build",
+        command: "npm run build",
+        timeout_ms: 90000,
+      }),
+    });
+    const { container } = render(
+      <Wrap toolKey="claude">
+        <ToolCard
+          tool={tool}
+          result={makeCompletion({ id: "m-done", toolCallId: "monitor-timeout", text: "build ok" })}
+        />
+      </Wrap>,
+    );
+    // timeout_ms 90000 -> formatted as "1m 30s" in the header chip.
+    expect(container.textContent).toContain("1m 30s");
+    fireEvent.click(container.querySelector("button")!);
+    expect(container.textContent).toContain("npm run build");
+    expect(container.textContent).toContain("build ok");
+  });
+
+  it("falls back to default primaries when harness args are empty", () => {
+    for (const [name, expected] of [
+      ["ToolSearch", "search tools"],
+      ["Monitor", "background watch"],
+      ["TaskStop", "stop task"],
+    ] as const) {
+      const { container } = render(
+        <Wrap toolKey="claude">
+          <ToolCard
+            tool={makeToolCall({ id: `empty-${name}`, name, kind: "other", args_preview: "{}" })}
+            result={undefined}
+          />
+        </Wrap>,
+      );
+      expect(container.textContent).toContain(expected);
+      cleanup();
+    }
+  });
 });
 
 describe("ToolCards profile-gated dispatch (opencode)", () => {
