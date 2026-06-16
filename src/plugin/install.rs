@@ -244,6 +244,14 @@ pub fn install(
     }
 
     let _lock = mutation_lock()?;
+    // Re-check under the lock: the duplicate guard above ran pre-lock (it has
+    // to, the prompt is interactive and the lock is never held across it), so
+    // two concurrent dashboard installs of the same id could both pass it and
+    // both prompt. Only one wins the lock; the loser must not overwrite the
+    // winner's freshly installed tree, grant, and lockfile entry.
+    if super::registry().get(&id).is_some() {
+        bail!("{id} is already installed; use `aoe plugin update {id}`");
+    }
     let dest = super::plugins_dir()?.join(&id);
     copy_plugin_tree(&staged.root, &dest)?;
 
@@ -295,8 +303,7 @@ pub fn update(
     plugin_id: &str,
     confirm: &mut dyn FnMut(&InstallPrompt) -> bool,
 ) -> Result<InstallOutcome> {
-    let mut lockfile = Lockfile::load()?;
-    let record = lockfile
+    let record = Lockfile::load()?
         .get(plugin_id)
         .ok_or_else(|| anyhow!("{plugin_id} is not installed"))?
         .clone();
@@ -322,8 +329,7 @@ pub fn update(
     let featured = featured_validation(&record.source, &staged)?;
     let new_hash = manifest_hash(staged.manifest_raw.as_bytes());
 
-    let mut grants = GrantStore::load()?;
-    let granted_caps = grants
+    let granted_caps = GrantStore::load()?
         .record(plugin_id)
         .map(|r| r.capabilities.clone())
         .unwrap_or_default();
@@ -353,6 +359,12 @@ pub fn update(
     }
 
     let _lock = mutation_lock()?;
+    // Re-load the grant and lockfile stores under the lock: the snapshots
+    // above were read before the (lock-free) interactive prompt, so a
+    // concurrent mutation could have superseded them. The load-modify-save
+    // writes below must build on current disk state, not the stale snapshot.
+    let mut grants = GrantStore::load()?;
+    let mut lockfile = Lockfile::load()?;
     let dest = super::plugins_dir()?.join(plugin_id);
     let backup = dest.with_extension("updating");
     if backup.exists() {
