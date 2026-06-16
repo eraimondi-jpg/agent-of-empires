@@ -67,12 +67,25 @@ impl PluginSource {
         }
     }
 
-    /// Human-readable origin for list/info surfaces.
+    /// Human-readable origin for local list/info surfaces (CLI, TUI). Includes
+    /// the full local path for `Path` installs; do NOT use on network surfaces.
     pub fn describe(&self) -> String {
         match self {
             PluginSource::Builtin => "builtin".to_string(),
             PluginSource::GitHub { slug } => format!("github:{slug}"),
             PluginSource::Path { path } => format!("path:{path}"),
+        }
+    }
+
+    /// Origin for network surfaces (REST `/api/plugins`, install-prompt JSON).
+    /// A `github` slug is a public repo, but a local `Path` is a privacy leak
+    /// (username, project layout) over a Tunnel/Funnel deployment, so it
+    /// collapses to the bare kind.
+    pub fn describe_redacted(&self) -> String {
+        match self {
+            PluginSource::Builtin => "builtin".to_string(),
+            PluginSource::GitHub { slug } => format!("github:{slug}"),
+            PluginSource::Path { .. } => "path".to_string(),
         }
     }
 }
@@ -117,4 +130,27 @@ pub fn reload_registry() -> Arc<PluginRegistry> {
         reg.active().map(|p| p.id().to_string()).collect();
     ui::evict_except(&active);
     reg
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacted_describe_hides_local_path() {
+        let p = PluginSource::Path {
+            path: "/Users/alice/secret-project/plugin".to_string(),
+        };
+        assert_eq!(p.describe_redacted(), "path");
+        assert!(!p.describe_redacted().contains("alice"));
+        // github slugs and builtin are public, kept verbatim.
+        assert_eq!(
+            PluginSource::GitHub {
+                slug: "owner/repo".to_string()
+            }
+            .describe_redacted(),
+            "github:owner/repo"
+        );
+        assert_eq!(PluginSource::Builtin.describe_redacted(), "builtin");
+    }
 }

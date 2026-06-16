@@ -62,7 +62,7 @@ fn plugin_json(p: &plugin::LoadedPlugin) -> serde_json::Value {
         "name": p.manifest.name,
         "version": p.manifest.version,
         "description": p.manifest.description,
-        "source": p.source.describe(),
+        "source": p.source.describe_redacted(),
         "trust": p.trust(),
         "enabled": p.enabled,
         "grant": match p.grant {
@@ -178,7 +178,7 @@ fn prompt_json(prompt: &InstallPrompt) -> serde_json::Value {
         "capabilities": prompt.capabilities,
         "previous_capabilities": prompt.previous_capabilities,
         "trust": prompt.trust,
-        "source": prompt.source.describe(),
+        "source": prompt.source.describe_redacted(),
         "featured": prompt.featured,
         "manifest_hash": prompt.manifest_hash,
         "isolation_summary": plugin::sandbox::backend().isolation_summary(),
