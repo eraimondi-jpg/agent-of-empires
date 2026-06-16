@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
+use unicode_normalization::UnicodeNormalization;
 
 /// sha256 over the plugin tree: for each file, the `/`-separated relative
 /// path, a NUL, the length, and the bytes, in sorted path order.
@@ -78,6 +79,10 @@ fn collect(root: &Path, dir: &Path, files: &mut Vec<(String, PathBuf)>) -> Resul
                 .map(|c| c.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
                 .join("/");
+            // NFC-normalize so a name stored decomposed (APFS/HFS+) and the
+            // same name stored composed (ext4/btrfs) hash identically; the
+            // featured pins in `featured.rs` are a cross-platform contract.
+            let rel = rel.nfc().collect::<String>();
             files.push((rel, path));
         }
     }
@@ -117,6 +122,19 @@ mod tests {
         let before = tree_hash(dir.path()).unwrap();
         write(dir.path(), "bin/worker", "v2");
         assert_ne!(before, tree_hash(dir.path()).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn precomposed_and_decomposed_names_hash_equal() {
+        // "café": precomposed é (U+00E9) vs decomposed e + U+0301. On a
+        // byte-preserving fs (ext4/btrfs) these are two distinct on-disk
+        // names; NFC normalization must collapse them to the same hash.
+        let a = tempfile::tempdir().unwrap();
+        write(a.path(), "caf\u{e9}.txt", "x");
+        let b = tempfile::tempdir().unwrap();
+        write(b.path(), "cafe\u{301}.txt", "x");
+        assert_eq!(tree_hash(a.path()).unwrap(), tree_hash(b.path()).unwrap());
     }
 
     #[cfg(unix)]
