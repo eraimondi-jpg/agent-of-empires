@@ -21,6 +21,8 @@ interface Props {
   activeSessionId: string | null;
   sessions: SessionResponse[];
   webSettings: { persistentTerminals: boolean; maxPersistentTerminals: number };
+  sidebarOpen: boolean;
+  onToggleSidebar: () => void;
   selectedFilePath: string | null;
   selectedRepoName: string | undefined;
   revision: number;
@@ -61,6 +63,8 @@ export function MobileMainPane({
   activeSessionId,
   sessions,
   webSettings,
+  sidebarOpen,
+  onToggleSidebar,
   selectedFilePath,
   selectedRepoName,
   revision,
@@ -119,6 +123,8 @@ export function MobileMainPane({
               sessions={sessions.filter((session) => session.view !== "structured")}
               persistent={webSettings.persistentTerminals}
               maxPersistentTerminals={webSettings.maxPersistentTerminals}
+              sidebarOpen={sidebarOpen}
+              onToggleSidebar={onToggleSidebar}
             />
           )}
         </div>

@@ -5,6 +5,8 @@ import { useMobileKeyboard } from "../hooks/useMobileKeyboard";
 import { MobileTerminalToolbar } from "./MobileTerminalToolbar";
 import { MobileLiveTerminal } from "./MobileLiveTerminal";
 import { KeyboardFab } from "./KeyboardFab";
+import { SidebarFab } from "./SidebarFab";
+import { useWebSettings } from "../hooks/useWebSettings";
 import { TerminalConnectionBanners } from "./TerminalConnectionBanners";
 import { ensureSession, ensureTerminal } from "../lib/api";
 import type { SessionResponse } from "../lib/types";
@@ -22,6 +24,12 @@ interface Props {
    *  default; the paired host/container shells reuse the same chrome
    *  with their own WS route, ensure call, and focus target. */
   surface?: "agent" | "paired-host" | "paired-container";
+  /** Current session-sidebar open state, for the optional mobile sidebar
+   *  FAB's aria-label. Only threaded for the agent terminal stack. */
+  sidebarOpen?: boolean;
+  /** Toggles the session sidebar. When provided (and the setting is on),
+   *  a mobile FAB renders next to the keyboard FAB (#2245). */
+  onToggleSidebar?: () => void;
 }
 
 const SURFACES = {
@@ -45,8 +53,9 @@ const SURFACES = {
  * not shrink. The pane re-pins itself to the bottom when its container
  * resizes, which is all a bottom-anchored chat-style surface needs.
  */
-export function LiveTerminalView({ session, active = true, surface = "agent" }: Props) {
+export function LiveTerminalView({ session, active = true, surface = "agent", sidebarOpen, onToggleSidebar }: Props) {
   const { wsPath, focusTarget, dataTerm } = SURFACES[surface];
+  const { settings } = useWebSettings();
   // Touch-only chrome (the soft-keyboard toolbar and its toggle FAB) is
   // pointless with a physical keyboard, so it stays off fine-pointer devices
   // now that this view also renders on desktop.
@@ -280,6 +289,9 @@ export function LiveTerminalView({ session, active = true, surface = "agent" }: 
           bottomAlign={surface === "agent"}
         />
         {coarse && live.state.connected && <KeyboardFab keyboardOpen={inputFocused} onToggle={toggleKeyboard} />}
+        {coarse && live.state.connected && settings.showSidebarFab && onToggleSidebar && (
+          <SidebarFab sidebarOpen={!!sidebarOpen} onToggle={onToggleSidebar} />
+        )}
       </div>
 
       {coarse && live.state.connected && (

@@ -1065,6 +1065,8 @@ function AppContent({ loginRequired, onLogout }: { loginRequired: boolean; onLog
           activeSessionId={activeSessionId}
           sessions={sessions}
           webSettings={webSettings}
+          sidebarOpen={sidebarOpen}
+          onToggleSidebar={() => setSidebarOpen((o) => !o)}
           selectedFilePath={selectedFilePath}
           selectedRepoName={selectedRepoName}
           revision={revision}
@@ -1116,6 +1118,8 @@ function AppContent({ loginRequired, onLogout }: { loginRequired: boolean; onLog
                     sessions={sessions.filter((session) => session.view !== "structured")}
                     persistent={webSettings.persistentTerminals}
                     maxPersistentTerminals={webSettings.maxPersistentTerminals}
+                    sidebarOpen={sidebarOpen}
+                    onToggleSidebar={() => setSidebarOpen((o) => !o)}
                   />
                 )}
               </div>
