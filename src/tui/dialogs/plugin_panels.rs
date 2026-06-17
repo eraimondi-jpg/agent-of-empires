@@ -138,9 +138,15 @@ impl PluginPanelsDialog {
             Style::default().fg(theme.dimmed),
         )));
 
+        // Clamp the offset to the content so an over-scroll (the Down key has
+        // no content-size context to stop at) never renders an empty body.
+        let max_scroll = lines
+            .len()
+            .saturating_sub(inner.height as usize)
+            .min(u16::MAX as usize) as u16;
         let body = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .scroll((self.scroll, 0));
+            .scroll((self.scroll.min(max_scroll), 0));
         f.render_widget(body, inner);
     }
 }

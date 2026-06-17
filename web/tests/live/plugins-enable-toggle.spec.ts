@@ -25,25 +25,33 @@ test("disabling a builtin plugin persists to the backend and survives a reload",
   await expect(toggle).toBeVisible({ timeout: 10_000 });
   await expect(toggle).toBeChecked();
 
-  // The checkbox is controlled by `plugin.enabled`, which only flips after
-  // the async setPluginEnabled + reload round-trip, so a plain click (not
-  // uncheck, which asserts the state changed synchronously) is what models
-  // a real user.
-  await toggle.click();
+  try {
+    // The checkbox is controlled by `plugin.enabled`, which only flips after
+    // the async setPluginEnabled + reload round-trip, so a plain click (not
+    // uncheck, which asserts the state changed synchronously) is what models
+    // a real user.
+    await toggle.click();
 
-  // Server-side: the disable reached the registry.
-  await expect(async () => {
-    expect(await statusEnabled(serve.baseUrl)).toBe(false);
-  }).toPass({ timeout: 5_000 });
+    // Server-side: the disable reached the registry.
+    await expect(async () => {
+      expect(await statusEnabled(serve.baseUrl)).toBe(false);
+    }).toPass({ timeout: 5_000 });
 
-  // Frontend-side: the persisted state reads back after a reload.
-  await page.reload();
-  const toggleAfter = page.getByLabel("Enable Agent Status Detection");
-  await expect(toggleAfter).not.toBeChecked({ timeout: 10_000 });
-
-  // Restore so the toggle round-trips both directions.
-  await toggleAfter.click();
-  await expect(async () => {
-    expect(await statusEnabled(serve.baseUrl)).toBe(true);
-  }).toPass({ timeout: 5_000 });
+    // Frontend-side: the persisted state reads back after a reload.
+    await page.reload();
+    const toggleAfter = page.getByLabel("Enable Agent Status Detection");
+    await expect(toggleAfter).not.toBeChecked({ timeout: 10_000 });
+  } finally {
+    // Always restore aoe.status so a failed assertion above cannot leak the
+    // disabled state into later live tests sharing this backend.
+    if (!(await statusEnabled(serve.baseUrl))) {
+      const restore = page.getByLabel("Enable Agent Status Detection");
+      if (!(await restore.isChecked())) {
+        await restore.click();
+      }
+      await expect(async () => {
+        expect(await statusEnabled(serve.baseUrl)).toBe(true);
+      }).toPass({ timeout: 5_000 });
+    }
+  }
 });

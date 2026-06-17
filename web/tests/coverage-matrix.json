@@ -2430,7 +2430,7 @@
     },
     {
       "id": "settings.plugins-live-toggle",
-      "kind": "playwright-live",
+      "kind": "live-playwright",
       "risk": "high",
       "specs": ["tests/live/plugins-enable-toggle.spec.ts"],
       "components": ["web/src/components/settings/PluginsSettings.tsx"]

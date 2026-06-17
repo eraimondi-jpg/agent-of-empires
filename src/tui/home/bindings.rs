@@ -750,8 +750,11 @@ pub fn parse_chord(s: &str) -> Option<Chord> {
         let (Some(c), None) = (chars.next(), chars.next()) else {
             return None;
         };
+        // Terminals deliver control letters lowercase and the core bindings are
+        // defined lowercase (`ctrl('d')`), so normalize: an uppercase `Ctrl+D`
+        // in a plugin manifest must match the same event, not silently fail.
         return Some(Chord {
-            code: KeyCode::Char(c),
+            code: KeyCode::Char(c.to_ascii_lowercase()),
             ctrl: true,
         });
     }
@@ -1052,5 +1055,16 @@ mod tests {
         assert_eq!(label(ActionId::Restart, false), "e");
         // NextWaiting has no strict binding.
         assert_eq!(label(ActionId::NextWaiting, true), "");
+    }
+
+    #[test]
+    fn parse_chord_lowercases_ctrl_char() {
+        // Uppercase Ctrl+D must parse to the same chord terminals deliver
+        // (lowercase 'd'), or a plugin keybind would silently never fire.
+        let upper = parse_chord("Ctrl+D").unwrap();
+        let lower = parse_chord("ctrl+d").unwrap();
+        assert_eq!(upper.code, KeyCode::Char('d'));
+        assert!(upper.ctrl);
+        assert_eq!(upper.code, lower.code);
     }
 }
