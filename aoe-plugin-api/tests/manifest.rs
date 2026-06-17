@@ -123,6 +123,37 @@ file = "themes/extra.toml"
     assert!(manifest.capabilities.is_empty());
 }
 
+#[test]
+fn min_aoe_version_is_optional_and_round_trips() {
+    let absent = PluginManifest::from_toml_str(
+        r#"
+id = "aoe.no-min"
+name = "No Min"
+version = "1.0.0"
+api_version = 1
+"#,
+    )
+    .expect("manifest without min_aoe_version must parse");
+    assert_eq!(absent.min_aoe_version, None);
+
+    let manifest = PluginManifest::from_toml_str(
+        r#"
+id = "aoe.with-min"
+name = "With Min"
+version = "1.0.0"
+api_version = 1
+min_aoe_version = "0.5.0"
+"#,
+    )
+    .expect("manifest with min_aoe_version must parse");
+    assert_eq!(manifest.min_aoe_version.as_deref(), Some("0.5.0"));
+
+    let serialized = toml::to_string(&manifest).expect("manifest must serialize");
+    let reparsed =
+        PluginManifest::from_toml_str(&serialized).expect("serialized form must reparse");
+    assert_eq!(reparsed.min_aoe_version.as_deref(), Some("0.5.0"));
+}
+
 fn invalid_messages(input: &str) -> Vec<String> {
     match PluginManifest::from_toml_str(input) {
         Err(ManifestError::Invalid(messages)) => messages,

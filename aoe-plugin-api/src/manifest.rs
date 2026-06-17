@@ -18,6 +18,12 @@ pub struct PluginManifest {
     pub version: String,
     /// Manifest schema / host API version this manifest targets.
     pub api_version: u32,
+    /// Minimum aoe release version this plugin requires (dotted numeric, e.g.
+    /// `0.5.0`). The host refuses to load the plugin when the running build is
+    /// older; unset means any host. Unlike `api_version`, the comparison is
+    /// host-side because this crate does not know the host's release version.
+    #[serde(default)]
+    pub min_aoe_version: Option<String>,
     #[serde(default)]
     pub description: String,
     #[serde(default)]

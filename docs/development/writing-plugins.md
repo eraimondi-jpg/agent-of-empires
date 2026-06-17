@@ -53,7 +53,20 @@ description = "One sentence about what it does."
 ```
 
 `api_version` is the manifest schema version; the host currently supports
-`1` (the `API_VERSION` constant in `aoe-plugin-api`). Install it:
+`1` (the `API_VERSION` constant in `aoe-plugin-api`).
+
+To require a minimum aoe release, add `min_aoe_version` (dotted numeric):
+
+```toml
+min_aoe_version = "0.5.0"
+```
+
+The host refuses to load the plugin when the running build is older, listing
+it as a warning in `aoe plugin list` rather than activating it with missing
+features. Omit it to support any host. This differs from `api_version`: the
+latter gates the manifest schema, the former gates the host's release version.
+
+Install it:
 
 ```sh
 aoe plugin install ./my-plugin

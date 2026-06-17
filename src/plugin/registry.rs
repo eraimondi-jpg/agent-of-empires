@@ -195,6 +195,16 @@ impl PluginRegistry {
                     continue;
                 }
             };
+            if let Some(min) = manifest.min_aoe_version.as_deref() {
+                let host = env!("CARGO_PKG_VERSION");
+                if !host_meets_min(min, host) {
+                    load_errors.push(format!(
+                        "{}: requires aoe >= {min} but this build is {host}; skipped",
+                        manifest_path.display()
+                    ));
+                    continue;
+                }
+            }
             let id = manifest.id.as_str().to_string();
             if plugins.iter().any(|p| p.id() == id) {
                 load_errors.push(format!(
@@ -252,9 +262,25 @@ impl PluginRegistry {
     }
 }
 
+/// Whether a host at version `host` satisfies a plugin's `min_aoe_version`.
+/// Reuses the dotted-numeric comparison the update checker uses; an equal or
+/// newer host passes, an older host fails.
+fn host_meets_min(min: &str, host: &str) -> bool {
+    !crate::update::is_newer_version(min, host)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_meets_min_gates_on_version() {
+        assert!(host_meets_min("0.5.0", "0.5.0"), "equal host satisfies min");
+        assert!(host_meets_min("0.5.0", "0.6.0"), "newer host satisfies min");
+        assert!(host_meets_min("0.5.0", "1.0.0"), "major-newer host passes");
+        assert!(!host_meets_min("0.6.0", "0.5.0"), "older host fails min");
+        assert!(!host_meets_min("1.0.0", "0.9.9"), "older major fails min");
+    }
 
     #[test]
     fn builtin_manifests_parse_and_have_unique_ids() {
