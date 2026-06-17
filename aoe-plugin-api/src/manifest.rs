@@ -226,12 +226,12 @@ pub struct ThemeContribution {
 /// in-core (Tier 0) or a batched RPC to the plugin worker (Tier 1).
 //
 // No deny_unknown_fields here: serde cannot combine it with #[serde(flatten)]
-// on `mode`. CAVEAT for plugin authors: because of that, a typo in a
-// `[[status_detection]]` key (e.g. `agnet` for `agent`, or `priorrity` inside
-// a rule) is SILENTLY DROPPED rather than rejected, and you then hit a
-// confusing downstream error. Verify a status_detection block with
-// `aoe plugin info <id>` after editing. Every other manifest struct uses
-// deny_unknown_fields and does fail loudly on an unknown key.
+// on `mode`. CAVEAT for plugin authors: because of that, a typo in a top-level
+// `[[status_detection]]` key (e.g. `agnet` for `agent`) is SILENTLY DROPPED
+// rather than rejected, and you then hit a confusing downstream error. Verify
+// a status_detection block with `aoe plugin info <id>` after editing. Keys
+// inside `[[status_detection.rules]]` are safe: DetectionRule keeps
+// deny_unknown_fields, so a rule typo still fails loudly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct StatusDetectionContribution {
@@ -293,6 +293,7 @@ pub struct RuntimeContribution {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ManifestError {
     #[error("manifest is not valid TOML: {0}")]
     Parse(#[from] toml::de::Error),
@@ -480,20 +481,21 @@ impl PluginManifest {
         );
 
         if let Some(runtime) = &self.runtime {
-            let ep = std::path::Path::new(&runtime.entrypoint);
-            let traversal = ep.components().any(|c| {
-                matches!(
-                    c,
-                    std::path::Component::ParentDir
-                        | std::path::Component::RootDir
-                        | std::path::Component::Prefix(_)
-                )
-            });
             check(
-                !runtime.entrypoint.is_empty() && !traversal,
+                is_safe_relative_plugin_path(&runtime.entrypoint),
                 format!(
                     "runtime.entrypoint {:?} must be a relative path inside the plugin (no leading \"/\", drive prefix, or \"..\")",
                     runtime.entrypoint
+                ),
+            );
+        }
+
+        for theme in &self.themes {
+            check(
+                is_safe_relative_plugin_path(&theme.file),
+                format!(
+                    "theme file {:?} must be a relative path inside the plugin (no leading \"/\", drive prefix, or \"..\")",
+                    theme.file
                 ),
             );
         }
@@ -510,4 +512,25 @@ fn is_key(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// A non-empty path the installer may safely join onto the plugin root: at
+/// least one normal component, and no `..`, leading `/`, or drive prefix that
+/// would escape the directory. Used for both `runtime.entrypoint` and theme
+/// files, which the host copies/spawns relative to the plugin root.
+fn is_safe_relative_plugin_path(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    let mut has_normal = false;
+    for component in std::path::Path::new(value).components() {
+        match component {
+            std::path::Component::Normal(_) => has_normal = true,
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => return false,
+        }
+    }
+    has_normal
 }

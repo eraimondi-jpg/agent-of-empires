@@ -239,6 +239,28 @@ entrypoint = "{ep}"
 }
 
 #[test]
+fn traversal_and_absolute_theme_files_are_rejected() {
+    for file in ["/etc/passwd", "../../secret.toml", ""] {
+        let all = invalid_messages(&format!(
+            r#"
+id = "acme.theme"
+name = "Theme"
+version = "0.1.0"
+api_version = 1
+
+[[themes]]
+file = "{file}"
+"#
+        ))
+        .join("\n");
+        assert!(
+            all.contains("theme file"),
+            "theme file {file:?} should be rejected, got: {all}"
+        );
+    }
+}
+
+#[test]
 fn duplicate_contributions_are_rejected() {
     let all = invalid_messages(
         r#"
