@@ -253,6 +253,16 @@ pub struct SettingsView {
     /// disturbs the keyboard cursor. Cleared on every keypress so
     /// hover doesn't linger after the user switches modalities.
     pub(super) mouse_pos: Option<(u16, u16)>,
+
+    /// Embedded plugin manager for the Plugins category: the same dialog the
+    /// command palette opens (`crate::tui::dialogs::PluginManagerDialog`),
+    /// hosted inline so management and per-plugin settings live on one screen.
+    /// One implementation, reused; it reloads its own list on mutation.
+    pub(super) plugin_manager: crate::tui::dialogs::PluginManagerDialog,
+    /// `Some(id)` while drilled into one plugin's settings from the manager
+    /// list (`self.fields` then holds that plugin's rows); `None` is the
+    /// manager-list view.
+    pub(super) plugin_settings_id: Option<String>,
 }
 
 impl SettingsView {
@@ -326,6 +336,8 @@ impl SettingsView {
             category_rects: Vec::new(),
             field_rects: Vec::new(),
             mouse_pos: None,
+            plugin_manager: crate::tui::dialogs::PluginManagerDialog::new(),
+            plugin_settings_id: None,
         };
 
         // The constructor parks `selected_category` at 0, which is the
@@ -466,6 +478,10 @@ impl SettingsView {
 
     /// Rebuild the fields list based on current category and scope
     pub(super) fn rebuild_fields(&mut self) {
+        // Any category/scope navigation leaves the Plugins drill-in, back to
+        // the manager list. (Field edits never call this, so an in-progress
+        // edit is never kicked out.)
+        self.plugin_settings_id = None;
         let category = self.current_category();
         let (scope_for_fields, global_ref, profile_ref) = match self.scope {
             SettingsScope::Global => (
@@ -494,6 +510,45 @@ impl SettingsView {
         // section divider, advance to the next real field so the user
         // never sees the cursor parked on a heading.
         self.snap_to_interactive_field_forward();
+    }
+
+    /// Drill into one plugin's settings from the Plugins manager list: the
+    /// field list becomes that plugin's rows (edited and saved like any other
+    /// setting). Esc returns to the list (see [`Self::exit_plugin_settings`]).
+    pub(super) fn enter_plugin_settings(&mut self, plugin_id: String) {
+        self.fields =
+            fields::build_fields_for_plugin(&plugin_id, &self.global_config, &self.profile_config);
+        self.plugin_settings_id = Some(plugin_id);
+        self.selected_field = 0;
+        self.fields_scroll_offset = 0;
+        self.snap_to_interactive_field_forward();
+    }
+
+    /// Leave per-plugin settings, back to the manager list. `rebuild_fields`
+    /// clears `plugin_settings_id` and restores the flat Plugins field list
+    /// (which keeps plugin settings searchable).
+    pub(super) fn exit_plugin_settings(&mut self) {
+        self.rebuild_fields();
+    }
+
+    /// Re-sync the in-memory `plugins` config after the embedded manager
+    /// mutated it on disk (enable/disable/install/update/uninstall write
+    /// immediately and reload the registry). Without this, a later settings
+    /// save would write the stale `plugins` table and clobber the change.
+    /// Only the `plugins` subtree is touched, so unrelated unsaved edits stay
+    /// flagged.
+    pub(super) fn resync_after_plugin_mutation(&mut self) {
+        let Ok(disk) = Config::load() else {
+            return;
+        };
+        self.global_config.plugins = disk.plugins;
+        if let (Some(obj), Ok(plugins_val)) = (
+            self.baseline_global.as_object_mut(),
+            serde_json::to_value(&self.global_config.plugins),
+        ) {
+            obj.insert("plugins".to_string(), plugins_val);
+        }
+        self.recompute_dirty();
     }
 
     /// Advance `selected_field` to the first interactive field
@@ -695,6 +750,13 @@ impl SettingsView {
             || self.list_edit_state.is_some()
             || self.custom_instruction_dialog.is_some()
             || self.search_input.is_some()
+            // The embedded plugin manager typing an install source counts as
+            // editing, so paste and focus behave while the Plugins tab owns
+            // the keyboard.
+            || (self.current_category() == SettingsCategory::Plugins
+                && self.focus == SettingsFocus::Fields
+                && self.plugin_settings_id.is_none()
+                && self.plugin_manager.is_capturing_input())
     }
 
     /// Open the settings-wide search overlay. Builds the initial hit
@@ -802,6 +864,24 @@ impl SettingsView {
             self.selected_category = idx;
         }
         self.rebuild_fields();
+        // The Plugins tab shows the manager by default, so a search hit on a
+        // plugin setting must drill into that plugin or the field would be
+        // hidden behind the manager list.
+        if hit.category == SettingsCategory::Plugins {
+            if let Some(plugin_id) = self
+                .fields
+                .iter()
+                .find(|f| f.ident() == hit.field_ident)
+                .and_then(|f| match &f.kind {
+                    fields::FieldKind::Schema { section, .. } => {
+                        crate::plugin::settings::parse_virtual(section).map(str::to_string)
+                    }
+                    _ => None,
+                })
+            {
+                self.enter_plugin_settings(plugin_id);
+            }
+        }
         if let Some(idx) = self
             .fields
             .iter()

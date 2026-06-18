@@ -700,6 +700,31 @@ pub fn build_fields_for_category(
     }
 }
 
+/// The setting rows for ONE plugin (its `plugin:<id>` virtual section), for the
+/// Plugins-tab drill-in. Reuses the full Plugins-category build and filters to
+/// the target plugin, so the value resolution, defaults, and persistence path
+/// are identical to the flat Plugins list. Plugin settings are global-only.
+pub fn build_fields_for_plugin(
+    plugin_id: &str,
+    base: &Config,
+    overrides: &ProfileConfig,
+) -> Vec<SettingField> {
+    build_fields_for_category(
+        SettingsCategory::Plugins,
+        SettingsScope::Global,
+        base,
+        overrides,
+    )
+    .into_iter()
+    .filter(|f| match &f.kind {
+        FieldKind::Schema { section, .. } => {
+            crate::plugin::settings::parse_virtual(section) == Some(plugin_id)
+        }
+        _ => false,
+    })
+    .collect()
+}
+
 /// Shared inputs for building rows in one category/scope pass.
 struct BuildCtx<'a> {
     scope: SettingsScope,

@@ -53,6 +53,10 @@ pub struct PluginManagerDialog {
     /// Filled by the explicit 'd' discover search; never fetched on open.
     discovered: Vec<crate::plugin::discover::DiscoveredPlugin>,
     discover_selected: usize,
+    /// Set whenever the on-disk plugin config changed (enable/disable, install,
+    /// update, uninstall). An embedding surface drains it via [`take_mutated`]
+    /// to re-sync its own config view; the standalone modal ignores it.
+    mutated: bool,
 }
 
 impl Default for PluginManagerDialog {
@@ -74,12 +78,35 @@ impl PluginManagerDialog {
             update_status: std::collections::HashMap::new(),
             discovered: Vec::new(),
             discover_selected: 0,
+            mutated: false,
         };
         dialog.reload();
         dialog
     }
 
+    /// Whether the manager is on the plugin list (not typing an install path,
+    /// browsing discovery, or approving capabilities). The settings host only
+    /// repurposes Enter as "open settings" while browsing.
+    pub fn is_browsing(&self) -> bool {
+        matches!(self.mode, Mode::Browse)
+    }
+
+    /// Whether the manager is capturing free text (the install-source input),
+    /// so an embedding surface treats it as an editing mode for paste/focus.
+    pub fn is_capturing_input(&self) -> bool {
+        matches!(self.mode, Mode::InstallInput)
+    }
+
+    /// Take and clear the "config mutated" flag (enable/disable/install/
+    /// update/uninstall wrote to disk and reloaded the registry).
+    pub fn take_mutated(&mut self) -> bool {
+        std::mem::take(&mut self.mutated)
+    }
+
     fn reload(&mut self) {
+        // reload() runs only after a config-mutating action (and once at
+        // construction), so it is the single place to flag a mutation.
+        self.mutated = true;
         let registry = crate::plugin::reload_registry();
         self.rows = registry.all().iter().map(|p| p.view()).collect();
         self.load_errors = registry.load_errors().to_vec();
@@ -330,12 +357,31 @@ impl PluginManagerDialog {
         }
     }
 
+    /// The currently selected plugin row, if any. Lets an embedding surface
+    /// (the settings Plugins tab) read the selection, e.g. to decide whether
+    /// to drill into the plugin's settings.
+    pub fn selected(&self) -> Option<&crate::plugin::PluginView> {
+        self.rows.get(self.selected)
+    }
+
+    /// Render as a centered modal (the command-palette surface): clears a
+    /// clamped sub-rect and draws into it.
     pub fn render(&self, f: &mut Frame, area: Rect, theme: &Theme) {
         let width = area.width.clamp(40, 100);
         let height = area.height.clamp(12, 28);
         let rect = centered_rect(area, width, height);
         f.render_widget(Clear, rect);
+        self.render_into(f, rect, theme);
+    }
 
+    /// Render directly into the given rect, no centering or clearing, for
+    /// embedding in the settings screen's Plugins category. Same manager, same
+    /// state, same key handler; only the framing differs.
+    pub fn render_inline(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        self.render_into(f, area, theme);
+    }
+
+    fn render_into(&self, f: &mut Frame, rect: Rect, theme: &Theme) {
         let title = match self.mode {
             Mode::Browse => " Plugins ",
             Mode::InstallInput => " Install plugin ",

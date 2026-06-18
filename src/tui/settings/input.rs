@@ -7,7 +7,9 @@ use tui_input::Input;
 use crate::tui::dialogs::{CustomInstructionDialog, DialogResult};
 
 use super::fields::ListItemValidation;
-use super::{FieldValue, ListEditState, SettingsFocus, SettingsScope, SettingsView};
+use super::{
+    FieldValue, ListEditState, SettingsCategory, SettingsFocus, SettingsScope, SettingsView,
+};
 
 /// Result of handling a key event in the settings view
 pub enum SettingsAction {
@@ -82,6 +84,26 @@ impl SettingsView {
         // settings view.
         if self.search_input.is_some() {
             return self.handle_search_key(key);
+        }
+
+        // The Plugins category hosts the plugin manager inline. While the
+        // right pane is focused: in the list view the manager owns the keys
+        // (toggle / install / update / uninstall / discover / capability
+        // approval), with Enter on a plugin that has settings drilling into
+        // them; in the drilled-in settings view the normal field editing below
+        // runs, with Esc stepping back to the list.
+        if self.current_category() == SettingsCategory::Plugins
+            && self.focus == SettingsFocus::Fields
+        {
+            if self.plugin_settings_id.is_some() {
+                if key.code == KeyCode::Esc {
+                    self.exit_plugin_settings();
+                    return SettingsAction::Continue;
+                }
+                // else fall through to the normal field-editing match below
+            } else {
+                return self.handle_plugins_manager_key(key);
+            }
         }
 
         // Normal mode
@@ -383,6 +405,34 @@ impl SettingsView {
     }
 
     /// Drive the settings-wide search overlay. Esc closes without
+    /// Route a key to the embedded plugin manager (Plugins category, list
+    /// view). Enter on a plugin with settings drills into them; everything
+    /// else is the shared manager's job. A management mutation re-syncs the
+    /// view's config; Esc/`q` (manager Cancel) returns to the category panel.
+    fn handle_plugins_manager_key(&mut self, key: KeyEvent) -> SettingsAction {
+        if key.code == KeyCode::Enter && self.plugin_manager.is_browsing() {
+            if let Some(p) = self.plugin_manager.selected() {
+                if p.setting_count > 0 {
+                    let id = p.id.clone();
+                    self.enter_plugin_settings(id);
+                    return SettingsAction::Continue;
+                }
+            }
+        }
+        match self.plugin_manager.handle_key(key) {
+            DialogResult::Continue | DialogResult::Submit(()) => {
+                if self.plugin_manager.take_mutated() {
+                    self.resync_after_plugin_mutation();
+                }
+                SettingsAction::Continue
+            }
+            DialogResult::Cancel => {
+                self.focus = SettingsFocus::Categories;
+                SettingsAction::Continue
+            }
+        }
+    }
+
     /// changing selection; Enter jumps to the highlighted hit; up/down
     /// navigates the hit list; every other key feeds `search_input`
     /// and re-runs the filter so the list narrows as the user types.

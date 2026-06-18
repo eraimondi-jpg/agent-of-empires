@@ -251,7 +251,15 @@ impl SettingsView {
             .split(area);
 
         self.render_categories(frame, layout[0], theme);
-        self.render_fields(frame, layout[1], theme);
+        // The Plugins category list view hosts the embedded plugin manager in
+        // the right pane; the per-plugin drill-in falls through to the normal
+        // field list (those rows are this plugin's settings).
+        if self.current_category() == SettingsCategory::Plugins && self.plugin_settings_id.is_none()
+        {
+            self.plugin_manager.render_inline(frame, layout[1], theme);
+        } else {
+            self.render_fields(frame, layout[1], theme);
+        }
     }
 
     fn render_categories(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
