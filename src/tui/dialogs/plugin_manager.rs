@@ -36,19 +36,11 @@ enum PendingAction {
     Update(String),
 }
 
-struct Row {
-    id: String,
-    name: String,
-    version: String,
-    trust: TrustLevel,
-    source: String,
-    enabled: bool,
-    grant: GrantStatus,
-    builtin: bool,
-}
-
 pub struct PluginManagerDialog {
-    rows: Vec<Row>,
+    /// The shared manager view-model, the same shape the web dashboard renders
+    /// from (`crate::plugin::view`). Built straight off the registry, so the
+    /// TUI never re-derives plugin fields.
+    rows: Vec<crate::plugin::PluginView>,
     load_errors: Vec<String>,
     selected: usize,
     mode: Mode,
@@ -89,20 +81,7 @@ impl PluginManagerDialog {
 
     fn reload(&mut self) {
         let registry = crate::plugin::reload_registry();
-        self.rows = registry
-            .all()
-            .iter()
-            .map(|p| Row {
-                id: p.id().to_string(),
-                name: p.manifest.name.clone(),
-                version: p.manifest.version.clone(),
-                trust: p.trust(),
-                source: p.source.describe(),
-                enabled: p.enabled,
-                grant: p.grant,
-                builtin: p.root.is_none(),
-            })
-            .collect();
+        self.rows = registry.all().iter().map(|p| p.view()).collect();
         self.load_errors = registry.load_errors().to_vec();
         if self.selected >= self.rows.len() {
             self.selected = self.rows.len().saturating_sub(1);
@@ -411,7 +390,7 @@ impl PluginManagerDialog {
                     ),
                     Span::styled(format!("{trust:<10}"), Style::default().fg(theme.dimmed)),
                     Span::styled(format!("{:<12}", state.0), Style::default().fg(state.1)),
-                    Span::styled(row.source.clone(), Style::default().fg(theme.dimmed)),
+                    Span::styled(row.source.describe(), Style::default().fg(theme.dimmed)),
                 ];
                 if self.update_status.get(&row.id)
                     == Some(&crate::plugin::update_check::UpdateStatus::Available)

@@ -34,8 +34,10 @@ pub struct GrantRecord {
     pub capabilities: Vec<Capability>,
 }
 
-/// Grant state of one plugin against the store.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Grant state of one plugin against the store. Serializes to
+/// `granted` / `missing` / `stale` for the shared plugin view-model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GrantStatus {
     /// Capabilities approved for this exact manifest hash.
     Granted,

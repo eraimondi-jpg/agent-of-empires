@@ -18,8 +18,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
+use crate::plugin;
 use crate::plugin::install::{InstallOutcome, InstallPrompt};
-use crate::plugin::{self, grants::GrantStatus};
 use crate::server::auth::AuthenticatedSession;
 
 fn error_response(status: StatusCode, code: &str, message: String) -> Response {
@@ -56,41 +56,12 @@ async fn mutation_gate(
     Ok(())
 }
 
-fn plugin_json(p: &plugin::LoadedPlugin) -> serde_json::Value {
-    json!({
-        "id": p.id(),
-        "name": p.manifest.name,
-        "version": p.manifest.version,
-        "description": p.manifest.description,
-        "source": p.source.describe_redacted(),
-        "trust": p.trust(),
-        "enabled": p.enabled,
-        "grant": match p.grant {
-            GrantStatus::Granted => "granted",
-            GrantStatus::Missing => "missing",
-            GrantStatus::Stale => "stale",
-        },
-        "active": p.active(),
-        "capabilities": p.manifest.capabilities,
-        "has_runtime": p.manifest.runtime.is_some(),
-        "setting_count": p.manifest.settings.len(),
-        "builtin": p.root.is_none(),
-        "link_handlers": p.manifest.link_handlers,
-        "panes": p
-            .manifest
-            .panes
-            .iter()
-            .map(|pane| json!({ "id": pane.id, "title": pane.title }))
-            .collect::<Vec<_>>(),
-    })
-}
-
 /// `GET /api/plugins`: every known plugin plus load errors and the honest
 /// isolation summary used to word install prompts.
 pub async fn list_plugins() -> Json<serde_json::Value> {
     let registry = plugin::registry();
     Json(json!({
-        "plugins": registry.all().iter().map(plugin_json).collect::<Vec<_>>(),
+        "plugins": registry.all().iter().map(|p| p.view()).collect::<Vec<_>>(),
         "load_errors": registry.load_errors(),
         "isolation_summary": plugin::sandbox::backend().isolation_summary(),
     }))

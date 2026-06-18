@@ -25,6 +25,7 @@ pub mod settings;
 pub mod status;
 pub mod ui;
 pub mod update_check;
+pub mod view;
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -33,6 +34,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 pub use registry::{LoadedPlugin, PluginRegistry};
+pub use view::{PaneView, PluginView};
 
 /// Where a plugin came from; drives its trust level.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
