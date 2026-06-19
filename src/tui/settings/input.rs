@@ -410,10 +410,30 @@ impl SettingsView {
     /// else is the shared manager's job. A management mutation re-syncs the
     /// view's config; Esc/`q` (manager Cancel) returns to the category panel.
     fn handle_plugins_manager_key(&mut self, key: KeyEvent) -> SettingsAction {
+        // Space STAGES enable/disable in this view's config, like every other
+        // settings row, instead of writing to disk immediately. That keeps it
+        // in the Ctrl-s save flow (no surprise immediate write, no file-watch
+        // flash); the row shows the pending state at once. Install / update /
+        // uninstall stay immediate (they are actions, not config), and the
+        // sub-modes keep their own keys (`is_browsing` excludes them).
+        if key.code == KeyCode::Char(' ') && self.plugin_manager.is_browsing() {
+            if let Some(p) = self.plugin_manager.selected() {
+                let id = p.id.clone();
+                let enabled = !p.enabled;
+                self.global_config
+                    .plugins
+                    .entry(id.clone())
+                    .or_default()
+                    .enabled = enabled;
+                self.recompute_dirty();
+                self.plugin_manager.set_row_enabled(&id, enabled);
+            }
+            return SettingsAction::Continue;
+        }
         // In the list view Enter means "open this plugin's settings" (a no-op
-        // when it has none); Space is the toggle. Enter keeps its manager
-        // meaning in the sub-modes (submit install path, install discovered,
-        // approve caps), which `is_browsing` excludes.
+        // when it has none). Enter keeps its manager meaning in the sub-modes
+        // (submit install path, install discovered, approve caps), which
+        // `is_browsing` excludes.
         if key.code == KeyCode::Enter && self.plugin_manager.is_browsing() {
             if let Some(p) = self.plugin_manager.selected() {
                 if p.setting_count > 0 {

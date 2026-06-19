@@ -721,6 +721,19 @@ impl SettingsView {
             }
         }
 
+        // Plugin enable/disable and per-plugin settings live in
+        // `config.plugins`. When that subtree changed, reload the registry so
+        // the save takes effect live: a disabled plugin's keybinds / sort /
+        // status / UI drop, an edited setting reaches the plugin. Compared
+        // against the still-old baseline before snapshotting. Mirrors what the
+        // immediate `aoe plugin enable/disable` CLI path does.
+        if self.scope == SettingsScope::Global {
+            let now_plugins = serde_json::to_value(&self.global_config.plugins).ok();
+            if now_plugins.as_ref() != self.baseline_global.get("plugins") {
+                crate::plugin::reload_registry();
+            }
+        }
+
         // The just-written state is the new clean baseline.
         self.snapshot_baseline();
         self.success_message = Some("Settings saved".to_string());

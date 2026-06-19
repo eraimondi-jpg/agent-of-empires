@@ -378,6 +378,17 @@ impl PluginManagerDialog {
         self.rows.get(self.selected)
     }
 
+    /// Reflect a staged enable/disable in the displayed list without touching
+    /// disk or the registry. The settings host stages the change in its own
+    /// config and persists it on save, so the row shows the pending state
+    /// immediately while still following the normal save flow.
+    pub fn set_row_enabled(&mut self, id: &str, enabled: bool) {
+        if let Some(row) = self.rows.iter_mut().find(|r| r.id == id) {
+            row.enabled = enabled;
+            row.active = enabled && row.grant == GrantStatus::Granted;
+        }
+    }
+
     /// Render as a centered modal (the command-palette surface): clears a
     /// clamped sub-rect and draws into it.
     pub fn render(&self, f: &mut Frame, area: Rect, theme: &Theme) {

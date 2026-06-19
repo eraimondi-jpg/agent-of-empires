@@ -65,4 +65,10 @@ fn settings_plugins_tab_hosts_manager_and_drills_into_settings() {
     h.send_keys("Escape");
     h.wait_for("Agent Status Detection");
     h.assert_screen_contains("opens settings");
+
+    // Toggling enable/disable STAGES like any other settings row (no immediate
+    // disk write that would bypass the save flow): the title's unsaved marker
+    // appears, persisted only on Ctrl-s.
+    h.send_keys("Space");
+    h.wait_for("Settings *");
 }
