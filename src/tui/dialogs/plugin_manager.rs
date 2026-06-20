@@ -396,28 +396,33 @@ impl PluginManagerDialog {
         let height = area.height.clamp(12, 28);
         let rect = centered_rect(area, width, height);
         f.render_widget(Clear, rect);
-        self.render_into(f, rect, theme);
+        // A modal always owns the keyboard, so its border is always accent.
+        self.render_into(f, rect, theme, true);
     }
 
     /// Render directly into the given rect, no centering or clearing, for
     /// embedding in the settings screen's Plugins category. Same manager, same
-    /// state, same key handler; only the framing differs.
-    pub fn render_inline(&self, f: &mut Frame, area: Rect, theme: &Theme) {
-        self.render_into(f, area, theme);
+    /// state, same key handler; only the framing differs. `focused` mirrors the
+    /// settings fields-pane focus so the border matches every other pane.
+    pub fn render_inline(&self, f: &mut Frame, area: Rect, theme: &Theme, focused: bool) {
+        self.render_into(f, area, theme, focused);
     }
 
-    fn render_into(&self, f: &mut Frame, rect: Rect, theme: &Theme) {
+    fn render_into(&self, f: &mut Frame, rect: Rect, theme: &Theme, focused: bool) {
         let title = match self.mode {
             Mode::Browse => " Plugins ",
             Mode::InstallInput => " Install plugin ",
             Mode::Discover => " Discover plugins ",
             Mode::ConfirmCaps { .. } => " Approve capabilities ",
         };
+        // Focus-aware border, matching the settings fields pane: accent when
+        // the pane holds the keyboard, dim border otherwise.
+        let border_color = if focused { theme.accent } else { theme.border };
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(theme.accent));
+            .border_style(Style::default().fg(border_color));
         let inner = block.inner(rect);
         f.render_widget(block, rect);
 

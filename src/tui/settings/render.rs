@@ -256,7 +256,9 @@ impl SettingsView {
         // field list (those rows are this plugin's settings).
         if self.current_category() == SettingsCategory::Plugins && self.plugin_settings_id.is_none()
         {
-            self.plugin_manager.render_inline(frame, layout[1], theme);
+            let focused = self.focus == SettingsFocus::Fields;
+            self.plugin_manager
+                .render_inline(frame, layout[1], theme, focused);
         } else {
             self.render_fields(frame, layout[1], theme);
         }
