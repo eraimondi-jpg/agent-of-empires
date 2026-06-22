@@ -464,6 +464,24 @@ const SILENT_ORPHAN_FAST_GRACE_DEFAULT: std::time::Duration = std::time::Duratio
 /// notification handler to reach back into a pinned `tokio::time::sleep`.
 const SILENT_ORPHAN_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Idle grace for the between-prompt watchdog once the cost-bearing
+/// end-of-turn `UsageUpdate` has arrived. Much shorter than the per-prompt
+/// `SILENT_ORPHAN_FAST_GRACE_DEFAULT`: that one also waits out a
+/// possibly-late `PromptResponse` over the wire, but a between-prompt
+/// agent-initiated turn has no RPC to wait for, so once it emits its
+/// end-of-turn marker and goes quiet a few seconds is enough. Kept low so
+/// the "monitoring" badge and running status clear promptly after a monitor
+/// turn finishes. A turn that actually continues emits fresh progress,
+/// which resets the idle timer and clears `cost_seen`, so this cannot cut a
+/// live turn short. See #2325.
+const BETWEEN_PROMPT_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Tick cadence for the between-prompt idle check. Faster than
+/// `SILENT_ORPHAN_CHECK_INTERVAL` so the badge and status clear within a few
+/// seconds of the turn ending. Only polled while the command loop is parked
+/// between prompts, so the extra wakeups are cheap. See #2325.
+const BETWEEN_PROMPT_IDLE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Classification of an inbound ACP `SessionUpdate` for the silent-
 /// orphan watchdog state machine. Sent from the notification handler
 /// to the prompt loop via a dedicated mpsc; the prompt loop owns the
@@ -886,6 +904,90 @@ fn terminal_stop_reason(
     } else {
         "prompt_complete"
     }
+}
+
+/// Decide whether the between-prompt idle watchdog should synthesize a
+/// terminal `Stopped` for an agent-initiated turn that ran with no
+/// aoe-issued `session/prompt`. A claude-code Monitor (or any backgrounded
+/// task) can fire AFTER the prompt that armed it already completed,
+/// resuming the agent into a fresh turn the per-prompt watchdog never
+/// saw; without this the turn never ends and the UI stays "running"
+/// forever. See #2325.
+///
+/// Pure so the precedence is unit-testable without the connection loop.
+/// Times are wall-clock millis (`chrono::Utc::now().timestamp_millis()`),
+/// matching the resume-idle watchdog. Mirrors the per-prompt watchdog's
+/// grace policy: the cost-bearing `UsageUpdate` is claude-agent-acp's
+/// end-of-turn marker, so once it has arrived the fast grace applies;
+/// otherwise the vendor-agnostic off-protocol floor governs. A pending
+/// scheduled wake (`wake_until` in the future) suppresses firing so a
+/// legitimately-sleeping monitor is never killed early.
+/// State update the between-prompt watchdog should apply for one inbound
+/// notification's classified signals. `None` when neither a lifecycle nor a
+/// wakeup signal is present (ambient updates do not touch the watchdog).
+///
+/// Extracted as a pure function so the cost / progress / wake bookkeeping is
+/// unit-testable without the notification closure. Every tracked signal
+/// refreshes `last_lifecycle_at` to `now_ms`, including `TerminalUsage`: the
+/// cost-bearing `UsageUpdate` is the end-of-turn marker, and the fast grace
+/// must measure from it (when the turn wrapped up) rather than from a
+/// possibly-stale earlier progress event. See #2325.
+#[derive(Debug, PartialEq)]
+struct BetweenPromptUpdate {
+    cost_seen: bool,
+    last_lifecycle_at: i64,
+    wake_until: i64,
+}
+
+fn between_prompt_signal_update(
+    lifecycle: Option<&LifecycleSignal>,
+    wakeup: Option<&LifecycleSignal>,
+    now_ms: i64,
+    prev_wake_until: i64,
+) -> Option<BetweenPromptUpdate> {
+    let mut update = match lifecycle {
+        Some(LifecycleSignal::TerminalUsage) => Some(BetweenPromptUpdate {
+            cost_seen: true,
+            last_lifecycle_at: now_ms,
+            wake_until: prev_wake_until,
+        }),
+        Some(_) => Some(BetweenPromptUpdate {
+            cost_seen: false,
+            last_lifecycle_at: now_ms,
+            wake_until: prev_wake_until,
+        }),
+        None => None,
+    };
+    // A scheduled wake (a re-armed monitor) suppresses firing until its
+    // deadline. Multiple wakes extend, never shorten, suppression.
+    if let Some(LifecycleSignal::WakeupPending { at }) = wakeup {
+        let deadline = at.timestamp_millis() + OFF_PROTOCOL_WORK_GRACE_FLOOR.as_millis() as i64;
+        update = Some(BetweenPromptUpdate {
+            cost_seen: false,
+            last_lifecycle_at: now_ms,
+            wake_until: deadline.max(prev_wake_until),
+        });
+    }
+    update
+}
+
+fn between_prompt_should_fire(
+    active: bool,
+    now_ms: i64,
+    last_lifecycle_ms: i64,
+    wake_until_ms: i64,
+    cost_seen: bool,
+    fast_grace: std::time::Duration,
+    floor: std::time::Duration,
+) -> bool {
+    if !active {
+        return false;
+    }
+    if now_ms < wake_until_ms {
+        return false;
+    }
+    let grace = if cost_seen { fast_grace } else { floor };
+    now_ms - last_lifecycle_ms >= grace.as_millis() as i64
 }
 
 /// Tagged lifecycle signal carried over the watchdog mpsc. The
@@ -4199,8 +4301,24 @@ async fn run_connection_task<W, R>(
     let first_event_after_attach = Arc::new(AtomicBool::new(false));
     let prompt_sent_since_attach = Arc::new(AtomicBool::new(false));
     let watchdog_fired = Arc::new(AtomicBool::new(false));
+    // Between-prompt idle watchdog state (#2325). Tracks an agent-initiated
+    // turn (Monitor / scheduled-wake resume) that runs with no aoe-issued
+    // `session/prompt`, so the outer command loop's idle tick can synthesize
+    // its terminal Stopped. `last_lifecycle_at` is updated only on transcript
+    // progress (NOT ambient AvailableCommandsUpdate), so periodic
+    // command-list refreshes can't keep resetting the idle timer.
+    let last_lifecycle_at = Arc::new(AtomicI64::new(now_ms));
+    let between_prompt_active = Arc::new(AtomicBool::new(false));
+    let between_prompt_cost_seen = Arc::new(AtomicBool::new(false));
+    let between_prompt_wake_until = Arc::new(AtomicI64::new(0));
+    let prompt_in_flight = Arc::new(AtomicBool::new(false));
     let last_event_at_for_notif = last_event_at.clone();
     let first_event_after_attach_for_notif = first_event_after_attach.clone();
+    let last_lifecycle_at_for_notif = last_lifecycle_at.clone();
+    let between_prompt_active_for_notif = between_prompt_active.clone();
+    let between_prompt_cost_seen_for_notif = between_prompt_cost_seen.clone();
+    let between_prompt_wake_until_for_notif = between_prompt_wake_until.clone();
+    let prompt_in_flight_for_notif = prompt_in_flight.clone();
 
     // Per-session tracker that drops claude-agent-acp's leaked consolidated
     // agent_message_chunk restatement before it doubles the rendered message.
@@ -4229,6 +4347,13 @@ async fn run_connection_task<W, R>(
                 let lifecycle_signal_tx = lifecycle_signal_tx_for_notif.clone();
                 let current_prompt_epoch = current_prompt_epoch_for_notif.clone();
                 let agent_msg_dedup = agent_msg_dedup_for_notif.clone();
+                let last_lifecycle_at = last_lifecycle_at_for_notif.clone();
+                let between_prompt_active = between_prompt_active_for_notif.clone();
+                let between_prompt_cost_seen =
+                    between_prompt_cost_seen_for_notif.clone();
+                let between_prompt_wake_until =
+                    between_prompt_wake_until_for_notif.clone();
+                let prompt_in_flight = prompt_in_flight_for_notif.clone();
                 async move {
                     last_event_at
                         .store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
@@ -4280,6 +4405,32 @@ async fn run_connection_task<W, R>(
                     // not proof of in-flight turn progress.
                     if lifecycle_signal.is_some() || wakeup_signal.is_some() {
                         first_event_after_attach.store(true, Ordering::Relaxed);
+                    }
+                    // Between-prompt idle tracking (#2325). Only while no
+                    // aoe-issued prompt is in flight: a lifecycle signal here
+                    // means the agent resumed itself (Monitor / scheduled
+                    // wake), a turn the per-prompt watchdog never sees. Mirror
+                    // its cost/progress/wake semantics so the outer loop's
+                    // idle tick applies the same grace. During a real prompt
+                    // the per-prompt watchdog owns this, so skip.
+                    if !prompt_in_flight.load(Ordering::Relaxed) {
+                        let now = chrono::Utc::now().timestamp_millis();
+                        if let Some(u) = between_prompt_signal_update(
+                            lifecycle_signal.as_ref(),
+                            wakeup_signal.as_ref(),
+                            now,
+                            between_prompt_wake_until.load(Ordering::Relaxed),
+                        ) {
+                            between_prompt_active.store(true, Ordering::Relaxed);
+                            between_prompt_cost_seen.store(u.cost_seen, Ordering::Relaxed);
+                            // Refresh from `now` on every tracked signal,
+                            // including TerminalUsage, so the fast grace
+                            // measures from when the turn wrapped up rather
+                            // than from a possibly-stale earlier progress
+                            // event. See #2325 review.
+                            last_lifecycle_at.store(u.last_lifecycle_at, Ordering::Relaxed);
+                            between_prompt_wake_until.store(u.wake_until, Ordering::Relaxed);
+                        }
                     }
                     let mapped_events =
                         map_update_to_events(notification.update, profile);
@@ -4900,8 +5051,46 @@ async fn run_connection_task<W, R>(
                 });
             }
 
+            // The idle tick fires the between-prompt watchdog (#2325). It is
+            // only polled while this loop is parked at `cmd_rx.recv()`, i.e.
+            // between prompts; during a prompt the inner drain owns the
+            // connection and this arm never runs, so the per-prompt watchdog
+            // stays the sole idle authority there. Emitting Stopped from the
+            // command loop (never a detached task) keeps it serialized with
+            // every other command, so it can't race a new prompt's events.
+            let mut between_prompt_idle_tick =
+                tokio::time::interval(BETWEEN_PROMPT_IDLE_CHECK_INTERVAL);
+            between_prompt_idle_tick
+                .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                let cmd = cmd_rx.recv().await;
+                let cmd = tokio::select! {
+                    cmd = cmd_rx.recv() => cmd,
+                    _ = between_prompt_idle_tick.tick() => {
+                        let now = chrono::Utc::now().timestamp_millis();
+                        if between_prompt_should_fire(
+                            between_prompt_active.load(Ordering::Relaxed),
+                            now,
+                            last_lifecycle_at.load(Ordering::Relaxed),
+                            between_prompt_wake_until.load(Ordering::Relaxed),
+                            between_prompt_cost_seen.load(Ordering::Relaxed),
+                            BETWEEN_PROMPT_IDLE_GRACE,
+                            OFF_PROTOCOL_WORK_GRACE_FLOOR,
+                        ) {
+                            between_prompt_active.store(false, Ordering::Relaxed);
+                            info!(
+                                target: "acp.protocol",
+                                session = %session_label,
+                                "between-prompt idle watchdog: synthesizing Stopped for completed agent-initiated turn"
+                            );
+                            let _ = event_tx_for_block
+                                .send(Event::Stopped {
+                                    reason: "agent_idle".into(),
+                                })
+                                .await;
+                        }
+                        continue;
+                    }
+                };
                 match cmd {
                     Some(ClientCmd::Prompt(blocks)) => {
                         // Scope the agent-message deduper to one turn: a new
@@ -4927,6 +5116,13 @@ async fn run_connection_task<W, R>(
                         // transition, so we no longer need to synthesize
                         // one for the orphaned prior turn.
                         prompt_sent_since_attach.store(true, Ordering::Relaxed);
+                        // A real prompt supersedes any agent-initiated turn the
+                        // between-prompt idle watchdog was tracking; this
+                        // prompt's own Stopped will own the next transition.
+                        // The per-prompt watchdog owns idle detection until the
+                        // Stopped emit below clears `prompt_in_flight`. See #2325.
+                        prompt_in_flight.store(true, Ordering::Relaxed);
+                        between_prompt_active.store(false, Ordering::Relaxed);
                         info!(target: "acp.protocol", "sending prompt ({} content blocks)", blocks.len());
                         // Drive the prompt request concurrently with the
                         // command channel so out-of-band notifications
@@ -5503,6 +5699,10 @@ async fn run_connection_task<W, R>(
                             .lock()
                             .expect("agent message dedup mutex poisoned")
                             .reset();
+                        // The prompt drain is done; hand idle ownership back to
+                        // the between-prompt watchdog for any agent-initiated
+                        // turn that fires after this point. See #2325.
+                        prompt_in_flight.store(false, Ordering::Relaxed);
                         if shutdown {
                             break;
                         }
@@ -6509,6 +6709,196 @@ mod tests {
             terminal_stop_reason(false, false, false, false, false, true),
             "cancelled"
         );
+    }
+
+    // Between-prompt idle watchdog fire decision (#2325). Wall-clock millis.
+    // Bind to the production constants so the test tracks the real grace.
+    const FAST: std::time::Duration = BETWEEN_PROMPT_IDLE_GRACE;
+    const FLOOR: std::time::Duration = OFF_PROTOCOL_WORK_GRACE_FLOOR;
+
+    #[test]
+    fn between_prompt_inactive_never_fires() {
+        // No agent-initiated turn tracked, even long past any grace.
+        assert!(!between_prompt_should_fire(
+            false, 10_000_000, 0, 0, true, FAST, FLOOR
+        ));
+    }
+
+    #[test]
+    fn between_prompt_fires_after_fast_grace_when_cost_seen() {
+        let last = 1_000_000;
+        let grace_ms = FAST.as_millis() as i64;
+        // Just under the fast grace: still waiting.
+        assert!(!between_prompt_should_fire(
+            true,
+            last + grace_ms - 500,
+            last,
+            0,
+            true,
+            FAST,
+            FLOOR
+        ));
+        // Past the fast grace: the completed turn ends.
+        assert!(between_prompt_should_fire(
+            true,
+            last + grace_ms + 500,
+            last,
+            0,
+            true,
+            FAST,
+            FLOOR
+        ));
+    }
+
+    #[test]
+    fn between_prompt_uses_floor_without_cost() {
+        let last = 1_000_000;
+        // 21s idle but no cost marker: the generous floor governs, no fire.
+        assert!(!between_prompt_should_fire(
+            true,
+            last + 21_000,
+            last,
+            0,
+            false,
+            FAST,
+            FLOOR
+        ));
+        // Past the 30-minute floor: fire even without a cost marker.
+        assert!(between_prompt_should_fire(
+            true,
+            last + 30 * 60 * 1000 + 1,
+            last,
+            0,
+            false,
+            FAST,
+            FLOOR
+        ));
+    }
+
+    #[test]
+    fn between_prompt_suppressed_while_wake_pending() {
+        let last = 1_000_000;
+        let now = last + 60_000; // idle well past fast grace
+        let wake_until = now + 5_000; // a re-armed monitor still sleeping
+                                      // Suppressed: the agent is deliberately asleep on a scheduled wake.
+        assert!(!between_prompt_should_fire(
+            true, now, last, wake_until, true, FAST, FLOOR
+        ));
+        // Once the wake deadline passes, the idle grace governs again.
+        assert!(between_prompt_should_fire(
+            true,
+            wake_until + 21_000,
+            last,
+            wake_until,
+            true,
+            FAST,
+            FLOOR
+        ));
+    }
+
+    #[test]
+    fn between_prompt_signal_update_terminal_usage_refreshes_timestamp() {
+        // TerminalUsage marks cost_seen AND refreshes last_lifecycle_at to
+        // `now`, so the fast grace measures from the cost marker, not a
+        // stale earlier progress event. See #2325 review.
+        let u =
+            between_prompt_signal_update(Some(&LifecycleSignal::TerminalUsage), None, 500_000, 0)
+                .expect("TerminalUsage is a tracked signal");
+        assert_eq!(
+            u,
+            BetweenPromptUpdate {
+                cost_seen: true,
+                last_lifecycle_at: 500_000,
+                wake_until: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn between_prompt_signal_update_progress_clears_cost_and_refreshes() {
+        let u = between_prompt_signal_update(Some(&LifecycleSignal::Progress), None, 500_000, 0)
+            .expect("Progress is a tracked signal");
+        assert_eq!(
+            u,
+            BetweenPromptUpdate {
+                cost_seen: false,
+                last_lifecycle_at: 500_000,
+                wake_until: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn between_prompt_signal_update_ambient_is_none() {
+        // No lifecycle and no wakeup signal: ambient update, no state change.
+        assert!(between_prompt_signal_update(None, None, 500_000, 42).is_none());
+    }
+
+    #[test]
+    fn between_prompt_signal_update_wakeup_extends_suppression() {
+        let at = chrono::DateTime::from_timestamp_millis(600_000).unwrap();
+        let expected_deadline = 600_000 + OFF_PROTOCOL_WORK_GRACE_FLOOR.as_millis() as i64;
+        // A later wake deadline wins; an earlier prev does not shorten it.
+        let u = between_prompt_signal_update(
+            None,
+            Some(&LifecycleSignal::WakeupPending { at }),
+            500_000,
+            1_000,
+        )
+        .expect("WakeupPending is a tracked signal");
+        assert_eq!(
+            u,
+            BetweenPromptUpdate {
+                cost_seen: false,
+                last_lifecycle_at: 500_000,
+                wake_until: expected_deadline,
+            }
+        );
+        // A larger prev_wake_until is preserved (suppression only extends).
+        let u2 = between_prompt_signal_update(
+            None,
+            Some(&LifecycleSignal::WakeupPending { at }),
+            500_000,
+            expected_deadline + 10_000,
+        )
+        .unwrap();
+        assert_eq!(u2.wake_until, expected_deadline + 10_000);
+    }
+
+    #[test]
+    fn between_prompt_stale_progress_plus_cost_marker_does_not_fire_early() {
+        // Regression for the state-update path (#2325 review): a progress
+        // event 10s ago, then a cost-bearing UsageUpdate now. The cost marker
+        // refreshes last_lifecycle_at, so 2s later (under the 3s grace) the
+        // watchdog must NOT fire even though cost_seen is true and the prior
+        // progress is older than the grace.
+        let cost_now = 1_000_000;
+        let stale_progress = cost_now - 10_000;
+        let u =
+            between_prompt_signal_update(Some(&LifecycleSignal::TerminalUsage), None, cost_now, 0)
+                .unwrap();
+        // The refresh, not the stale progress, governs the grace window.
+        assert_eq!(u.last_lifecycle_at, cost_now);
+        assert_ne!(u.last_lifecycle_at, stale_progress);
+        assert!(!between_prompt_should_fire(
+            true,
+            cost_now + 2_000,
+            u.last_lifecycle_at,
+            u.wake_until,
+            u.cost_seen,
+            FAST,
+            FLOOR,
+        ));
+        // After the full grace it does fire.
+        assert!(between_prompt_should_fire(
+            true,
+            cost_now + FAST.as_millis() as i64 + 1,
+            u.last_lifecycle_at,
+            u.wake_until,
+            u.cost_seen,
+            FAST,
+            FLOOR,
+        ));
     }
 
     #[tokio::test]
