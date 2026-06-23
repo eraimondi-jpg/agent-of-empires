@@ -3845,8 +3845,16 @@ impl HomeView {
                 .clone()
                 .unwrap_or_else(|| self.config_profile());
             let profiles = list_profiles().unwrap_or_else(|_| vec![current_profile.clone()]);
-            let existing_groups: Vec<String> =
-                self.all_groups().iter().map(|g| g.path.clone()).collect();
+            // Duplicate-name validation is per-profile (rename_selected_group
+            // checks only the target profile's tree), so the dialog's existing
+            // names must be scoped to this group's profile too. Spanning all
+            // profiles would falsely block renaming to a name that only
+            // collides with a same-named group in a different profile.
+            let existing_groups: Vec<String> = self
+                .group_trees
+                .get(&current_profile)
+                .map(|t| t.get_all_groups().iter().map(|g| g.path.clone()).collect())
+                .unwrap_or_default();
             self.group_rename_context = Some(super::GroupRenameContext {
                 old_path: group_path.clone(),
                 old_profile: current_profile.clone(),
@@ -3990,16 +3998,31 @@ impl HomeView {
                 self.info_dialog = Some(InfoDialog::new("Cannot Modify Project Groups", hint));
                 return;
             }
+            // Scope the count to the selected group's profile: two groups in
+            // different profiles can share a path, and counting by path alone
+            // would pop the "delete N sessions" options dialog for an empty
+            // group whose same-named twin in another profile still has rows.
+            let owning_profile = self.selected_group_profile.clone();
             let prefix = format!("{}/", group_path);
             let session_count = self
                 .instances
                 .iter()
-                .filter(|i| i.group_path == *group_path || i.group_path.starts_with(&prefix))
+                .filter(|i| {
+                    (i.group_path == *group_path || i.group_path.starts_with(&prefix))
+                        && owning_profile
+                            .as_ref()
+                            .is_none_or(|p| &i.source_profile == p)
+                })
                 .count();
 
             if session_count > 0 {
-                let has_managed_worktrees = self.group_has_managed_worktrees(group_path, &prefix);
-                let has_containers = self.group_has_containers(group_path, &prefix);
+                let has_managed_worktrees = self.group_has_managed_worktrees(
+                    group_path,
+                    &prefix,
+                    owning_profile.as_deref(),
+                );
+                let has_containers =
+                    self.group_has_containers(group_path, &prefix, owning_profile.as_deref());
                 self.group_delete_options_dialog = Some(GroupDeleteOptionsDialog::new(
                     group_path.clone(),
                     session_count,

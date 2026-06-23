@@ -2344,8 +2344,8 @@ fn test_group_has_managed_worktrees() {
     view.flat_items = view.build_flat_items();
     view.update_selected();
 
-    assert!(view.group_has_managed_worktrees("work", "work/"));
-    assert!(!view.group_has_managed_worktrees("other", "other/"));
+    assert!(view.group_has_managed_worktrees("work", "work/", None));
+    assert!(!view.group_has_managed_worktrees("other", "other/", None));
 }
 
 #[test]
@@ -2394,8 +2394,8 @@ fn test_group_has_containers() {
     view.flat_items = view.build_flat_items();
     view.update_selected();
 
-    assert!(view.group_has_containers("work", "work/"));
-    assert!(!view.group_has_containers("other", "other/"));
+    assert!(view.group_has_containers("work", "work/", None));
+    assert!(!view.group_has_containers("other", "other/", None));
 }
 
 #[test]
@@ -4592,6 +4592,136 @@ fn test_delete_group_scoped_to_owning_profile() {
     assert_eq!(
         beta_inst.group_path, "work",
         "beta's instance should still be in 'work'"
+    );
+}
+
+/// Opening the group-delete dialog must scope its session count to the
+/// selected group's profile. Two profiles can own a same-named group; an
+/// empty group in one profile should open the simple confirm, not the
+/// "delete N sessions" options dialog driven by its populated twin in
+/// another profile. Regression for the group-key conflict where the empty
+/// group was not the one the delete modal acted on.
+#[test]
+#[serial]
+fn test_group_delete_dialog_scoped_to_owning_profile() {
+    use crate::session::GroupTree;
+
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+
+    // alpha owns an EMPTY "work" group (group exists, no sessions).
+    let storage_a = Storage::new_unwatched("alpha").unwrap();
+    let mut tree_a = GroupTree::new_with_groups(&[], &[]);
+    tree_a.create_group("work");
+    storage_a
+        .update(|i, g| {
+            *i = vec![];
+            *g = tree_a.get_all_groups();
+            Ok(())
+        })
+        .unwrap();
+
+    // beta owns a same-named "work" group that still has a session.
+    let storage_b = Storage::new_unwatched("beta").unwrap();
+    let mut inst_b = Instance::new("B1", "/tmp/b");
+    inst_b.group_path = "work".to_string();
+    let tree_b = GroupTree::new_with_groups(&[inst_b.clone()], &[]);
+    storage_b
+        .update(|i, g| {
+            *i = [inst_b].to_vec();
+            *g = tree_b.get_all_groups();
+            Ok(())
+        })
+        .unwrap();
+
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let mut view = HomeView::new(None, tools, crate::file_watch::FileWatchService::noop()).unwrap();
+    view.group_by = crate::session::config::GroupByMode::Manual;
+    view.flat_items = view.build_flat_items();
+    view.update_selected();
+
+    // Select alpha's (empty) "work" group.
+    let work_indices: Vec<usize> = view
+        .flat_items
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, item)| match item {
+            Item::Group { path, .. } if path == "work" => Some(idx),
+            _ => None,
+        })
+        .collect();
+    for idx in work_indices {
+        view.cursor = idx;
+        view.update_selected();
+        if view.selected_group_profile.as_deref() == Some("alpha") {
+            break;
+        }
+    }
+    assert_eq!(view.selected_group_profile.as_deref(), Some("alpha"));
+
+    view.open_delete_for_selected();
+
+    assert!(
+        view.group_delete_options_dialog.is_none(),
+        "empty group must not trigger the with-sessions options dialog from a same-named group in another profile"
+    );
+    assert!(
+        view.confirm_dialog.is_some(),
+        "empty group should open the simple delete-group confirm"
+    );
+}
+
+/// Changing a session's profile via the rename dialog must prune the
+/// source profile's now-empty group, just like the restart-with-edits
+/// path does. Without the prune the source keeps an empty group with the
+/// same name as the target's copy, which renders as a duplicate header and
+/// collides on the shared group key.
+#[test]
+#[serial]
+fn test_rename_profile_change_prunes_source_group() {
+    use crate::session::GroupTree;
+
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+
+    // alpha has one session in "work"; beta exists but is empty.
+    let storage_a = Storage::new_unwatched("alpha").unwrap();
+    let mut inst_a = Instance::new("A1", "/tmp/a");
+    inst_a.group_path = "work".to_string();
+    let id = inst_a.id.clone();
+    let tree_a = GroupTree::new_with_groups(&[inst_a.clone()], &[]);
+    storage_a
+        .update(|i, g| {
+            *i = [inst_a].to_vec();
+            *g = tree_a.get_all_groups();
+            Ok(())
+        })
+        .unwrap();
+    let _storage_b = Storage::new_unwatched("beta").unwrap();
+
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let mut view = HomeView::new(None, tools, crate::file_watch::FileWatchService::noop()).unwrap();
+    view.group_by = crate::session::config::GroupByMode::Manual;
+    view.flat_items = view.build_flat_items();
+    view.selected_session = Some(id.clone());
+
+    // Move the session alpha -> beta, keeping the same group name.
+    view.rename_selected("", None, Some("beta"), false).unwrap();
+
+    let moved = view.instances().iter().find(|i| i.id == id).unwrap();
+    assert_eq!(moved.source_profile, "beta");
+    assert_eq!(moved.group_path, "work");
+    assert!(
+        view.group_trees.get("beta").unwrap().group_exists("work"),
+        "beta should own the 'work' group after the move"
+    );
+    assert!(
+        !view
+            .group_trees
+            .get("alpha")
+            .map(|t| t.group_exists("work"))
+            .unwrap_or(false),
+        "alpha's now-empty 'work' group should be pruned after the profile move"
     );
 }
 
