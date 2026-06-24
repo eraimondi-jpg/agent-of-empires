@@ -930,8 +930,9 @@ fn terminal_stop_reason(
 /// grace policy: the cost-bearing `UsageUpdate` is claude-agent-acp's
 /// end-of-turn marker, so once it has arrived the fast grace applies;
 /// otherwise the vendor-agnostic off-protocol floor governs. A pending
-/// scheduled wake (`wake_until` in the future) suppresses firing so a
-/// legitimately-sleeping monitor is never killed early.
+/// scheduled wake (`wake_at` in the future) suppresses firing so a
+/// legitimately-sleeping monitor is never killed early; once `wake_at` is
+/// in the past the turn is treated as finished and self-heals fast (#2371).
 /// State update the between-prompt watchdog should apply for one inbound
 /// notification's classified signals. `None` when neither a lifecycle nor a
 /// wakeup signal is present (ambient updates do not touch the watchdog).
@@ -946,57 +947,86 @@ fn terminal_stop_reason(
 struct BetweenPromptUpdate {
     cost_seen: bool,
     last_lifecycle_at: i64,
-    wake_until: i64,
+    /// Absolute wake timestamp (ms) of the most recent pending scheduled
+    /// wake, `0` when none. The watchdog suppresses while `now < wake_at`
+    /// (a future wake the agent is legitimately sleeping toward) and, once
+    /// the wake `at` has passed with no agent resume, treats the turn as
+    /// finished and fires on the fast grace instead of the 30-minute floor.
+    /// Stored as the wake `at` directly (not `at + floor`) so an expired
+    /// wake self-heals promptly. See #2371.
+    wake_at: i64,
 }
 
 fn between_prompt_signal_update(
     lifecycle: Option<&LifecycleSignal>,
     wakeup: Option<&LifecycleSignal>,
     now_ms: i64,
-    prev_wake_until: i64,
+    prev_wake_at: i64,
 ) -> Option<BetweenPromptUpdate> {
     let mut update = match lifecycle {
         Some(LifecycleSignal::TerminalUsage) => Some(BetweenPromptUpdate {
             cost_seen: true,
             last_lifecycle_at: now_ms,
-            wake_until: prev_wake_until,
+            wake_at: prev_wake_at,
         }),
         Some(_) => Some(BetweenPromptUpdate {
             cost_seen: false,
             last_lifecycle_at: now_ms,
-            wake_until: prev_wake_until,
+            wake_at: prev_wake_at,
         }),
         None => None,
     };
-    // A scheduled wake (a re-armed monitor) suppresses firing until its
-    // deadline. Multiple wakes extend, never shorten, suppression.
+    // A scheduled wake (a re-armed monitor or /loop fallback) suppresses
+    // firing until its `at`. Multiple wakes extend, never shorten,
+    // suppression, so keep the latest deadline.
     if let Some(LifecycleSignal::WakeupPending { at }) = wakeup {
-        let deadline = at.timestamp_millis() + OFF_PROTOCOL_WORK_GRACE_FLOOR.as_millis() as i64;
         update = Some(BetweenPromptUpdate {
             cost_seen: false,
             last_lifecycle_at: now_ms,
-            wake_until: deadline.max(prev_wake_until),
+            wake_at: at.timestamp_millis().max(prev_wake_at),
         });
     }
     update
 }
 
+#[allow(clippy::too_many_arguments)]
 fn between_prompt_should_fire(
     active: bool,
     now_ms: i64,
     last_lifecycle_ms: i64,
-    wake_until_ms: i64,
+    wake_at_ms: Option<i64>,
     cost_seen: bool,
+    tools_in_flight: bool,
+    off_protocol_work_seen: bool,
     fast_grace: std::time::Duration,
     floor: std::time::Duration,
 ) -> bool {
     if !active {
         return false;
     }
-    if now_ms < wake_until_ms {
+    // An in-flight tool (npm install, Playwright, a Task subagent) means the
+    // turn is legitimately busy; never fire while one is open. See #1401.
+    if tools_in_flight {
         return false;
     }
-    let grace = if cost_seen { fast_grace } else { floor };
+    // A future wake is the agent legitimately sleeping toward `at`; suppress
+    // until it passes so a parked /loop or monitor is not killed early.
+    if wake_at_ms.is_some_and(|at| now_ms < at) {
+        return false;
+    }
+    let expired_wake = wake_at_ms.is_some_and(|at| now_ms >= at);
+    // Off-protocol work (backgrounded Bash, async sub-agent) completes on the
+    // protocol while the real work keeps running, so hold the conservative
+    // floor even though no tool is "in flight". See #1401, #1858. Otherwise a
+    // cost-resolved end-of-turn marker OR an expired wake (the agent should
+    // have resumed and did not) means the turn is done: self-heal fast.
+    let grace = if off_protocol_work_seen {
+        floor
+    } else if cost_seen || expired_wake {
+        fast_grace
+    } else {
+        floor
+    };
     now_ms - last_lifecycle_ms >= grace.as_millis() as i64
 }
 
@@ -4341,14 +4371,30 @@ async fn run_connection_task<W, R>(
     let last_lifecycle_at = Arc::new(AtomicI64::new(now_ms));
     let between_prompt_active = Arc::new(AtomicBool::new(false));
     let between_prompt_cost_seen = Arc::new(AtomicBool::new(false));
-    let between_prompt_wake_until = Arc::new(AtomicI64::new(0));
+    // Wake `at` (ms) of the latest pending scheduled wake, 0 when none.
+    let between_prompt_wake_at = Arc::new(AtomicI64::new(0));
+    // In-flight tool calls for the between-prompt (agent-initiated) path,
+    // keyed by tool_call_id -> the `run_in_background` flag observed at
+    // ToolStarted. Mirrors the per-prompt SilentOrphanWatchdog's
+    // `tool_calls_in_flight` map (by id, not a count, so duplicate or
+    // unmatched completions cannot drift the state). See #2371.
+    let between_prompt_tools = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+        String,
+        bool,
+    >::new()));
+    // Latched true when a successful tool completion carried an off-protocol
+    // marker OR its launch set `run_in_background`: the work keeps running
+    // after the ToolCall completes, so the watchdog holds the floor.
+    let between_prompt_off_protocol = Arc::new(AtomicBool::new(false));
     let prompt_in_flight = Arc::new(AtomicBool::new(false));
     let last_event_at_for_notif = last_event_at.clone();
     let first_event_after_attach_for_notif = first_event_after_attach.clone();
     let last_lifecycle_at_for_notif = last_lifecycle_at.clone();
     let between_prompt_active_for_notif = between_prompt_active.clone();
     let between_prompt_cost_seen_for_notif = between_prompt_cost_seen.clone();
-    let between_prompt_wake_until_for_notif = between_prompt_wake_until.clone();
+    let between_prompt_wake_at_for_notif = between_prompt_wake_at.clone();
+    let between_prompt_tools_for_notif = between_prompt_tools.clone();
+    let between_prompt_off_protocol_for_notif = between_prompt_off_protocol.clone();
     let prompt_in_flight_for_notif = prompt_in_flight.clone();
 
     // Per-session tracker that drops claude-agent-acp's leaked consolidated
@@ -4382,8 +4428,11 @@ async fn run_connection_task<W, R>(
                 let between_prompt_active = between_prompt_active_for_notif.clone();
                 let between_prompt_cost_seen =
                     between_prompt_cost_seen_for_notif.clone();
-                let between_prompt_wake_until =
-                    between_prompt_wake_until_for_notif.clone();
+                let between_prompt_wake_at =
+                    between_prompt_wake_at_for_notif.clone();
+                let between_prompt_tools = between_prompt_tools_for_notif.clone();
+                let between_prompt_off_protocol =
+                    between_prompt_off_protocol_for_notif.clone();
                 let prompt_in_flight = prompt_in_flight_for_notif.clone();
                 async move {
                     last_event_at
@@ -4450,7 +4499,7 @@ async fn run_connection_task<W, R>(
                             lifecycle_signal.as_ref(),
                             wakeup_signal.as_ref(),
                             now,
-                            between_prompt_wake_until.load(Ordering::Relaxed),
+                            between_prompt_wake_at.load(Ordering::Relaxed),
                         ) {
                             between_prompt_active.store(true, Ordering::Relaxed);
                             between_prompt_cost_seen.store(u.cost_seen, Ordering::Relaxed);
@@ -4460,7 +4509,45 @@ async fn run_connection_task<W, R>(
                             // than from a possibly-stale earlier progress
                             // event. See #2325 review.
                             last_lifecycle_at.store(u.last_lifecycle_at, Ordering::Relaxed);
-                            between_prompt_wake_until.store(u.wake_until, Ordering::Relaxed);
+                            between_prompt_wake_at.store(u.wake_at, Ordering::Relaxed);
+                        }
+                        // Track in-flight tool calls and off-protocol work for
+                        // the between-prompt path so the idle watchdog never
+                        // fires while a tool is open or backgrounded work is
+                        // still running. Mirrors the per-prompt watchdog's
+                        // `tool_calls_in_flight` + `off_protocol_work_seen`.
+                        // See #2371, #1401.
+                        match lifecycle_signal.as_ref() {
+                            Some(LifecycleSignal::ToolStarted {
+                                id,
+                                is_background_task,
+                            }) => {
+                                let mut tools = between_prompt_tools
+                                    .lock()
+                                    .expect("between-prompt tools mutex poisoned");
+                                let entry = tools.entry(id.clone()).or_insert(false);
+                                *entry = *entry || *is_background_task;
+                            }
+                            Some(LifecycleSignal::ToolCompleted {
+                                id,
+                                succeeded,
+                                off_protocol_work,
+                            }) => {
+                                let was_background = between_prompt_tools
+                                    .lock()
+                                    .expect("between-prompt tools mutex poisoned")
+                                    .remove(id)
+                                    .unwrap_or(false);
+                                // A failed launch keeps no background work
+                                // running, so it must not pin the floor.
+                                if *succeeded
+                                    && (off_protocol_work.is_some() || was_background)
+                                {
+                                    between_prompt_off_protocol
+                                        .store(true, Ordering::Relaxed);
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     let mapped_events =
@@ -5138,16 +5225,36 @@ async fn run_connection_task<W, R>(
                     cmd = cmd_rx.recv() => cmd,
                     _ = between_prompt_idle_tick.tick() => {
                         let now = chrono::Utc::now().timestamp_millis();
+                        let wake_at = match between_prompt_wake_at.load(Ordering::Relaxed) {
+                            0 => None,
+                            at => Some(at),
+                        };
+                        let tools_in_flight = !between_prompt_tools
+                            .lock()
+                            .expect("between-prompt tools mutex poisoned")
+                            .is_empty();
                         if between_prompt_should_fire(
                             between_prompt_active.load(Ordering::Relaxed),
                             now,
                             last_lifecycle_at.load(Ordering::Relaxed),
-                            between_prompt_wake_until.load(Ordering::Relaxed),
+                            wake_at,
                             between_prompt_cost_seen.load(Ordering::Relaxed),
+                            tools_in_flight,
+                            between_prompt_off_protocol.load(Ordering::Relaxed),
                             BETWEEN_PROMPT_IDLE_GRACE,
                             OFF_PROTOCOL_WORK_GRACE_FLOOR,
                         ) {
+                            // Clear all between-prompt state so a stale expired
+                            // wake can't accelerate (or an off-protocol latch
+                            // can't pin) the next agent-initiated turn. See #2371.
                             between_prompt_active.store(false, Ordering::Relaxed);
+                            between_prompt_cost_seen.store(false, Ordering::Relaxed);
+                            between_prompt_wake_at.store(0, Ordering::Relaxed);
+                            between_prompt_off_protocol.store(false, Ordering::Relaxed);
+                            between_prompt_tools
+                                .lock()
+                                .expect("between-prompt tools mutex poisoned")
+                                .clear();
                             info!(
                                 target: "acp.protocol",
                                 session = %session_label,
@@ -5194,6 +5301,17 @@ async fn run_connection_task<W, R>(
                         // Stopped emit below clears `prompt_in_flight`. See #2325.
                         prompt_in_flight.store(true, Ordering::Relaxed);
                         between_prompt_active.store(false, Ordering::Relaxed);
+                        // A real prompt supersedes any agent-initiated turn the
+                        // between-prompt watchdog was tracking; reset its state
+                        // so a leftover wake / off-protocol latch / open tool
+                        // from the prior turn can't skew this prompt. See #2371.
+                        between_prompt_cost_seen.store(false, Ordering::Relaxed);
+                        between_prompt_wake_at.store(0, Ordering::Relaxed);
+                        between_prompt_off_protocol.store(false, Ordering::Relaxed);
+                        between_prompt_tools
+                            .lock()
+                            .expect("between-prompt tools mutex poisoned")
+                            .clear();
                         info!(target: "acp.protocol", "sending prompt ({} content blocks)", blocks.len());
                         // Drive the prompt request concurrently with the
                         // command channel so out-of-band notifications
@@ -6791,7 +6909,7 @@ mod tests {
     fn between_prompt_inactive_never_fires() {
         // No agent-initiated turn tracked, even long past any grace.
         assert!(!between_prompt_should_fire(
-            false, 10_000_000, 0, 0, true, FAST, FLOOR
+            false, 10_000_000, 0, None, true, false, false, FAST, FLOOR
         ));
     }
 
@@ -6804,8 +6922,10 @@ mod tests {
             true,
             last + grace_ms - 500,
             last,
-            0,
+            None,
             true,
+            false,
+            false,
             FAST,
             FLOOR
         ));
@@ -6814,8 +6934,10 @@ mod tests {
             true,
             last + grace_ms + 500,
             last,
-            0,
+            None,
             true,
+            false,
+            false,
             FAST,
             FLOOR
         ));
@@ -6824,12 +6946,15 @@ mod tests {
     #[test]
     fn between_prompt_uses_floor_without_cost() {
         let last = 1_000_000;
-        // 21s idle but no cost marker: the generous floor governs, no fire.
+        // 21s idle but no cost marker and no expired wake: the generous floor
+        // governs (a turn doing silent background work, #1858), no fire.
         assert!(!between_prompt_should_fire(
             true,
             last + 21_000,
             last,
-            0,
+            None,
+            false,
+            false,
             false,
             FAST,
             FLOOR
@@ -6839,7 +6964,9 @@ mod tests {
             true,
             last + 30 * 60 * 1000 + 1,
             last,
-            0,
+            None,
+            false,
+            false,
             false,
             FAST,
             FLOOR
@@ -6847,20 +6974,105 @@ mod tests {
     }
 
     #[test]
-    fn between_prompt_suppressed_while_wake_pending() {
+    fn between_prompt_suppressed_while_future_wake_pending() {
+        // A future wake (#1401): the agent is deliberately asleep toward `at`.
+        // Suppressed even long past the floor.
         let last = 1_000_000;
-        let now = last + 60_000; // idle well past fast grace
-        let wake_until = now + 5_000; // a re-armed monitor still sleeping
-                                      // Suppressed: the agent is deliberately asleep on a scheduled wake.
+        let now = last + 60_000;
+        let wake_at = now + 5_000; // still in the future relative to `now`
         assert!(!between_prompt_should_fire(
-            true, now, last, wake_until, true, FAST, FLOOR
+            true,
+            now,
+            last,
+            Some(wake_at),
+            false,
+            false,
+            false,
+            FAST,
+            FLOOR
         ));
-        // Once the wake deadline passes, the idle grace governs again.
+    }
+
+    #[test]
+    fn between_prompt_expired_wake_fires_on_fast_grace() {
+        // The #2371 bug: the agent scheduled a wake for `wake_at`, kept working
+        // past it, then went quiet without resuming. Once the wake `at` is in
+        // the past and no tool / off-protocol work protects the turn, it must
+        // self-heal on the fast grace, NOT the 30-minute floor.
+        let last = 1_000_000;
+        let wake_at = last - 10_000; // already expired when the turn went quiet
+                                     // Just under the fast grace: still waiting.
+        assert!(!between_prompt_should_fire(
+            true,
+            last + FAST.as_millis() as i64 - 500,
+            last,
+            Some(wake_at),
+            false,
+            false,
+            false,
+            FAST,
+            FLOOR
+        ));
+        // Past the fast grace: fire, instead of holding the floor for 30 min.
         assert!(between_prompt_should_fire(
             true,
-            wake_until + 21_000,
+            last + FAST.as_millis() as i64 + 500,
             last,
-            wake_until,
+            Some(wake_at),
+            false,
+            false,
+            false,
+            FAST,
+            FLOOR
+        ));
+    }
+
+    #[test]
+    fn between_prompt_expired_wake_suppressed_while_tool_in_flight() {
+        // Wake expired AND a tool is still open (a fired wake that resumed and
+        // launched a long tool): never fire while a tool runs. Preserves #1401.
+        let last = 1_000_000;
+        let wake_at = last - 10_000;
+        assert!(!between_prompt_should_fire(
+            true,
+            last + 60_000,
+            last,
+            Some(wake_at),
+            false,
+            true, // tool in flight
+            false,
+            FAST,
+            FLOOR
+        ));
+    }
+
+    #[test]
+    fn between_prompt_expired_wake_with_off_protocol_holds_floor() {
+        // Wake expired and no tool open, but a backgrounded Bash / async agent
+        // is still running off-protocol: hold the floor, do not fast-fire and
+        // kill the background work. Preserves #1401 / #1858.
+        let last = 1_000_000;
+        let wake_at = last - 10_000;
+        // 21s in: fast grace would have fired, but off-protocol holds the floor.
+        assert!(!between_prompt_should_fire(
+            true,
+            last + 21_000,
+            last,
+            Some(wake_at),
+            false,
+            false,
+            true, // off-protocol work latched
+            FAST,
+            FLOOR
+        ));
+        // Past the floor it still fires (the floor, not a permanent pin).
+        assert!(between_prompt_should_fire(
+            true,
+            last + 30 * 60 * 1000 + 1,
+            last,
+            Some(wake_at),
+            false,
+            false,
             true,
             FAST,
             FLOOR
@@ -6880,7 +7092,7 @@ mod tests {
             BetweenPromptUpdate {
                 cost_seen: true,
                 last_lifecycle_at: 500_000,
-                wake_until: 0,
+                wake_at: 0,
             }
         );
     }
@@ -6894,7 +7106,7 @@ mod tests {
             BetweenPromptUpdate {
                 cost_seen: false,
                 last_lifecycle_at: 500_000,
-                wake_until: 0,
+                wake_at: 0,
             }
         );
     }
@@ -6906,10 +7118,10 @@ mod tests {
     }
 
     #[test]
-    fn between_prompt_signal_update_wakeup_extends_suppression() {
+    fn between_prompt_signal_update_wakeup_stores_at_and_never_shortens() {
         let at = chrono::DateTime::from_timestamp_millis(600_000).unwrap();
-        let expected_deadline = 600_000 + OFF_PROTOCOL_WORK_GRACE_FLOOR.as_millis() as i64;
-        // A later wake deadline wins; an earlier prev does not shorten it.
+        // The wake `at` is stored directly (not `at + floor`), so an expired
+        // wake can self-heal on the fast grace. See #2371.
         let u = between_prompt_signal_update(
             None,
             Some(&LifecycleSignal::WakeupPending { at }),
@@ -6922,18 +7134,18 @@ mod tests {
             BetweenPromptUpdate {
                 cost_seen: false,
                 last_lifecycle_at: 500_000,
-                wake_until: expected_deadline,
+                wake_at: 600_000,
             }
         );
-        // A larger prev_wake_until is preserved (suppression only extends).
+        // A later pending wake does not shorten suppression: keep the max.
         let u2 = between_prompt_signal_update(
             None,
             Some(&LifecycleSignal::WakeupPending { at }),
             500_000,
-            expected_deadline + 10_000,
+            900_000,
         )
         .unwrap();
-        assert_eq!(u2.wake_until, expected_deadline + 10_000);
+        assert_eq!(u2.wake_at, 900_000);
     }
 
     #[test]
@@ -6955,8 +7167,10 @@ mod tests {
             true,
             cost_now + 2_000,
             u.last_lifecycle_at,
-            u.wake_until,
+            None,
             u.cost_seen,
+            false,
+            false,
             FAST,
             FLOOR,
         ));
@@ -6965,8 +7179,10 @@ mod tests {
             true,
             cost_now + FAST.as_millis() as i64 + 1,
             u.last_lifecycle_at,
-            u.wake_until,
+            None,
             u.cost_seen,
+            false,
+            false,
             FAST,
             FLOOR,
         ));
