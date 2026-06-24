@@ -88,9 +88,27 @@ Both fields are additive (`#[serde(default, skip_serializing_if = ...)]`):
 absent in older on-disk rows, so they deserialize to empty and need no data
 migration.
 
+## Shared substrate
+
+Two neutral modules hold the protocol-agnostic plumbing that both `src/acp/`
+and the future plugin host build on, so the host never depends on ACP (the
+dependency arrow runs consumer -> substrate):
+
+- `src/process/worker.rs`: worker-subprocess plumbing, process-group
+  signalling (terminate/kill/reap), pid liveness, the runner self-inspection
+  state machine, and the `<dir>/<id>.{json,sock,log,restart}` path builders.
+  The consumer supplies the base directory and a pid extractor for record
+  inspection.
+- `src/events/`: a durable event-log storage core, a topic-keyed SQLite seq
+  log with retention, keyset scans, seq bookkeeping, and attachment blobs over
+  opaque JSON payloads. The consumer holds the `Connection` and owns its
+  payload type and replay semantics. `acp::event_store::EventStore` is the
+  first consumer (`Schema::new("acp")` keeps the existing `acp_events` tables,
+  so no migration).
+
 ## What comes next
 
 Each deferred piece returns as its own PR once the core is proven: the
-contribution schema and registries, the JSON-RPC worker runtime and event bus,
-the capability model, external (GitHub/local) installation, and the
-discovery/featured supply-chain layer.
+contribution schema and registries, the JSON-RPC worker runtime built on the
+substrate above, the capability model, external (GitHub/local) installation,
+and the discovery/featured supply-chain layer.

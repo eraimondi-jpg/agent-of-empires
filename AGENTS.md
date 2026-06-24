@@ -10,7 +10,8 @@
 - `src/tui/`: ratatui UI and input handling.
 - `src/session/`: session storage, configuration, and group management.
 - `src/tmux/`: tmux integration and status detection.
-- `src/process/`: OS-specific process handling (`macos.rs`, `linux.rs`).
+- `src/process/`: OS-specific process handling (`macos.rs`, `linux.rs`) plus `worker.rs`, the protocol-agnostic worker-subprocess substrate (process-group signalling, liveness, on-disk worker paths) that `src/acp/` consumes and the plugin host will reuse.
+- `src/events/`: protocol-agnostic durable event-log storage core (topic-keyed SQLite seq log, retention, keyset scans, attachments); `src/acp/`'s `EventStore` is the first consumer.
 - `src/docker/`: Docker sandboxing and container management.
 - `src/git/`: git worktree operations and template resolution.
 - `src/server/`: web dashboard backend (axum server, REST API, WebSocket PTY relay, auth).
