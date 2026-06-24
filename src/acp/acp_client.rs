@@ -890,7 +890,12 @@ impl SilentOrphanWatchdog {
 /// recovery (#2237) deliberately sets NONE of these flags and breaks the
 /// loop, so it falls through to `prompt_complete`: the turn finished, the
 /// adapter just never sent the PromptResponse, so it must NOT collapse
-/// into `prompt_orphaned` (which would trigger a worker restart).
+/// into `prompt_orphaned` (which would trigger a worker restart). Its
+/// post-cancel sibling `finished_after_orphan_cancel` (#2370) covers the
+/// case where the cost marker arrives only AFTER the grace already expired
+/// and the orphan cancel fired: the cancel was premature, so the turn is
+/// demoted back to `prompt_complete` unless the adapter is still wedged on
+/// the RPC (`agent_unresponsive` / `shutdown`), which keeps the restart.
 fn terminal_stop_reason(
     rate_limited: bool,
     force_stopped: bool,
@@ -898,11 +903,24 @@ fn terminal_stop_reason(
     agent_unresponsive: bool,
     shutdown: bool,
     prompt_cancelled: bool,
+    finished_after_orphan_cancel: bool,
 ) -> &'static str {
     if rate_limited {
         "rate_limited"
     } else if force_stopped {
         "user_forced"
+    } else if finished_after_orphan_cancel && !agent_unresponsive && !shutdown {
+        // A cost-populated UsageUpdate that lands after a timer-driven orphan
+        // cancel proves the turn actually finished; the cancel was premature.
+        // End cleanly as prompt_complete (no worker restart, no "didn't notify
+        // the daemon" banner), the post-cancel sibling of the pre-grace #2237
+        // recovery. The cancel makes the adapter resolve as
+        // StopReason::Cancelled, so this must outrank both prompt_orphaned and
+        // prompt_cancelled. A genuinely RPC-wedged adapter (cancel-escalation
+        // grace fired, so agent_unresponsive / shutdown) is excluded here and
+        // still restarts the worker, since the connection may be unusable for
+        // the next prompt. See #2370.
+        "prompt_complete"
     } else if prompt_orphaned {
         "prompt_orphaned"
     } else if agent_unresponsive {
@@ -5749,6 +5767,30 @@ async fn run_connection_task<W, R>(
                         //   - the finished-but-unacked recovery breaks with
                         //     no flag set, falling through to prompt_complete
                         //     so the turn does NOT restart the worker (#2237).
+                        // Apply any lifecycle signal still queued when the loop
+                        // broke. A cost-populated UsageUpdate can land in the
+                        // same tick prompt_fut resolves, so without this drain
+                        // the watchdog state read below could miss it and
+                        // misclassify a finished turn. Mirrors the
+                        // start-of-prompt drain. See #2370.
+                        while let Ok(env) = lifecycle_signal_rx.try_recv() {
+                            if env.epoch == this_prompt_epoch {
+                                watchdog.apply_signal(
+                                    env.signal,
+                                    tokio::time::Instant::now(),
+                                    chrono::Utc::now(),
+                                    watchdog_cfg,
+                                );
+                            }
+                        }
+                        // A cost-populated UsageUpdate after a timer-driven
+                        // orphan cancel proves the turn finished; the cancel was
+                        // premature. terminal_stop_reason demotes it to
+                        // prompt_complete unless the adapter is still RPC-wedged.
+                        // See #2370.
+                        let finished_after_orphan_cancel = orphan_cancel_sent
+                            && watchdog.cost_seen()
+                            && watchdog.off_protocol_work_seen().is_none();
                         let reason = terminal_stop_reason(
                             rate_limited,
                             force_stopped,
@@ -5756,6 +5798,7 @@ async fn run_connection_task<W, R>(
                             agent_unresponsive,
                             shutdown,
                             prompt_cancelled,
+                            finished_after_orphan_cancel,
                         );
                         let _ = event_tx_for_block
                             .send(Event::Stopped {
@@ -6754,7 +6797,7 @@ mod tests {
     #[test]
     fn terminal_stop_reason_all_false_is_prompt_complete() {
         assert_eq!(
-            terminal_stop_reason(false, false, false, false, false, false),
+            terminal_stop_reason(false, false, false, false, false, false, false),
             "prompt_complete"
         );
     }
@@ -6763,22 +6806,55 @@ mod tests {
     fn terminal_stop_reason_precedence_is_preserved() {
         // rate_limited wins over everything.
         assert_eq!(
-            terminal_stop_reason(true, true, true, true, true, true),
+            terminal_stop_reason(true, true, true, true, true, true, true),
             "rate_limited"
         );
         // force_stopped beats a prompt_orphaned flag set earlier.
         assert_eq!(
-            terminal_stop_reason(false, true, true, false, false, false),
+            terminal_stop_reason(false, true, true, false, false, false, false),
             "user_forced"
         );
         // prompt_orphaned (genuine wedge) wins over a later shutdown/cancel.
         assert_eq!(
-            terminal_stop_reason(false, false, true, false, true, false),
+            terminal_stop_reason(false, false, true, false, true, false, false),
             "prompt_orphaned"
         );
         assert_eq!(
-            terminal_stop_reason(false, false, false, false, false, true),
+            terminal_stop_reason(false, false, false, false, false, true, false),
             "cancelled"
+        );
+    }
+
+    #[test]
+    fn terminal_stop_reason_late_cost_demotes_orphan_and_cancelled() {
+        // #2370: the orphan cancel fired on the timer, the adapter then
+        // resolved the prompt as Cancelled (because we cancelled), but a
+        // cost-populated UsageUpdate proved the turn finished. The demotion
+        // must outrank BOTH prompt_orphaned and prompt_cancelled.
+        assert_eq!(
+            terminal_stop_reason(false, false, true, false, false, true, true),
+            "prompt_complete"
+        );
+    }
+
+    #[test]
+    fn terminal_stop_reason_late_cost_does_not_mask_rpc_wedge_or_user_intent() {
+        // #2370: a cost frame proves the model work finished, but if the
+        // adapter is still wedged on the RPC (cancel-escalation grace fired)
+        // the worker connection may be unusable for the next prompt, so the
+        // genuine-wedge restart must survive.
+        assert_eq!(
+            terminal_stop_reason(false, false, true, true, true, true, true),
+            "prompt_orphaned"
+        );
+        // rate_limited and user force_stopped still win over the demotion.
+        assert_eq!(
+            terminal_stop_reason(true, false, true, false, false, true, true),
+            "rate_limited"
+        );
+        assert_eq!(
+            terminal_stop_reason(false, true, true, false, false, true, true),
+            "user_forced"
         );
     }
 
@@ -6999,6 +7075,39 @@ mod tests {
         assert!(!w.should_fire(t0 + std::time::Duration::from_secs(60), cfg));
         // And must eventually fire after the full base grace.
         assert!(w.should_fire(t0 + std::time::Duration::from_secs(125), cfg));
+    }
+
+    #[tokio::test]
+    async fn watchdog_cost_seen_clears_when_progress_resumes() {
+        // #2370: finished_after_orphan_cancel reads cost_seen() directly to
+        // demote a premature orphan cancel. If a cost marker arrives but the
+        // turn then resumes real work, cost_seen() must flip back to false so a
+        // turn that did NOT finish is never demoted to prompt_complete.
+        let cfg = watchdog_test_cfg();
+        let t0 = tokio::time::Instant::now();
+        let wall = chrono::Utc::now();
+        let mut w = SilentOrphanWatchdog::new();
+        w.apply_signal(LifecycleSignal::Progress, t0, wall, cfg);
+        w.apply_signal(
+            LifecycleSignal::TerminalUsage,
+            t0 + std::time::Duration::from_secs(1),
+            wall,
+            cfg,
+        );
+        assert!(
+            w.cost_seen(),
+            "cost marker must be observable after TerminalUsage"
+        );
+        w.apply_signal(
+            LifecycleSignal::Progress,
+            t0 + std::time::Duration::from_secs(2),
+            wall,
+            cfg,
+        );
+        assert!(
+            !w.cost_seen(),
+            "progress after the cost marker means the turn resumed; must not demote"
+        );
     }
 
     #[tokio::test]
