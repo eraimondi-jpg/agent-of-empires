@@ -16,6 +16,12 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 
+/// Protocol-agnostic plumbing for supervised worker subprocesses, lifted
+/// out of `src/acp/` so the future plugin host can reuse it. Serve-gated
+/// because its only consumer today is the serve-gated `acp` module.
+#[cfg(feature = "serve")]
+pub mod worker;
+
 /// Get the PID of the shell process running in a tmux pane
 pub fn get_pane_pid(session_name: &str) -> Option<u32> {
     // Use `^.0` to target the first window's first pane regardless of
