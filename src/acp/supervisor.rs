@@ -2350,7 +2350,7 @@ impl<S: BroadcastSink> Supervisor<S> {
         // also taken down by an explicit "kill them all" request, not left
         // orphaned under PID 1. See #1689.
         for (session_id, pid) in registry_pids {
-            super::worker_registry::terminate_runner_group(pid);
+            crate::process::worker::terminate_process_group(pid);
             super::worker_registry::delete(&session_id).ok();
         }
         #[cfg(not(unix))]

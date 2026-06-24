@@ -28,6 +28,11 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
+// Generic worker-subprocess plumbing now lives in `process::worker`; the
+// registry is the ACP consumer of it. Re-exported so the names referenced
+// across the ACP code (and its tests) keep resolving here.
+pub use crate::process::worker::{is_pid_alive, validate_id as validate_session_id};
+
 /// Bump when the on-disk schema changes incompatibly. Older entries with
 /// a smaller `runner_version` are swept on startup instead of dialed.
 pub const RUNNER_VERSION: u32 = 1;
@@ -134,70 +139,25 @@ fn now_secs() -> u64 {
 /// unix sockets. Auto-created on first access.
 pub fn workers_dir() -> Result<PathBuf> {
     let dir = crate::session::get_app_dir()?.join("acp-workers");
-    if !dir.exists() {
-        std::fs::create_dir_all(&dir).with_context(|| {
-            format!("creating structured view workers dir at {}", dir.display())
-        })?;
-        // Owner-only on the directory itself so other users on a shared
-        // host can't enumerate session ids.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-        }
-    }
+    crate::process::worker::ensure_dir(&dir)?;
     Ok(dir)
-}
-
-/// Defense-in-depth check on a session_id before it's interpolated into
-/// any `<workers_dir>/<session_id>.<ext>` path. Production session_ids
-/// come from `Uuid::new_v4()` so they satisfy this trivially, but the
-/// `aoe __acp-runner` subcommand accepts `--session-id` as a CLI
-/// arg, and we don't want a user invoking the runner with
-/// `--session-id "../../foo"` to write registry/socket/log files
-/// outside the dedicated worker directory. Not a privilege escalation
-/// (same UID), but a basic input-validation gap worth closing.
-///
-/// Accepts: alphanumeric, `-`, `_`. Rejects: empty, `/`, `\`, `.` (so
-/// `..` and leading-dot hidden files are both out), null bytes, and
-/// anything longer than 128 bytes (UUIDs are 36; this leaves room for
-/// prefixed test ids without permitting arbitrarily-long inputs).
-pub fn validate_session_id(session_id: &str) -> Result<()> {
-    if session_id.is_empty() {
-        anyhow::bail!("session_id must not be empty");
-    }
-    if session_id.len() > 128 {
-        anyhow::bail!("session_id too long ({} bytes, max 128)", session_id.len());
-    }
-    if !session_id
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    {
-        anyhow::bail!(
-            "session_id contains disallowed characters: must be ASCII alphanumeric, '-', or '_'"
-        );
-    }
-    Ok(())
 }
 
 /// `<workers_dir>/<session_id>.json`.
 pub fn record_path(session_id: &str) -> Result<PathBuf> {
-    validate_session_id(session_id)?;
-    Ok(workers_dir()?.join(format!("{session_id}.json")))
+    crate::process::worker::record_path(&workers_dir()?, session_id)
 }
 
 /// `<workers_dir>/<session_id>.sock`. Caller computes this once and threads
 /// the same path into both the runner spawn and the daemon connect.
 pub fn socket_path_for(session_id: &str) -> Result<PathBuf> {
-    validate_session_id(session_id)?;
-    Ok(workers_dir()?.join(format!("{session_id}.sock")))
+    crate::process::worker::socket_path(&workers_dir()?, session_id)
 }
 
 /// `<workers_dir>/<session_id>.log` is the runner-side stderr drain
 /// consumed by `aoe acp logs --session <id>`.
 pub fn log_path_for(session_id: &str) -> Result<PathBuf> {
-    validate_session_id(session_id)?;
-    Ok(workers_dir()?.join(format!("{session_id}.log")))
+    crate::process::worker::log_path(&workers_dir()?, session_id)
 }
 
 /// Sentinel file `<workers_dir>/<session_id>.restart`. Written by
@@ -210,8 +170,7 @@ pub fn log_path_for(session_id: &str) -> Result<PathBuf> {
 ///   - signal the reconciler to clear the `attempted` set for this id
 ///     so the next 2s tick actually spawns a fresh worker.
 pub fn restart_marker_path(session_id: &str) -> Result<PathBuf> {
-    validate_session_id(session_id)?;
-    Ok(workers_dir()?.join(format!("{session_id}.restart")))
+    crate::process::worker::restart_marker_path(&workers_dir()?, session_id)
 }
 
 /// Best-effort write of an empty restart-pending marker. Called by the
@@ -333,27 +292,6 @@ pub fn delete(session_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Probe whether `pid` is still alive. On Unix: `kill(pid, 0)` returns
-/// `Ok(())` for live and `Err(ESRCH)` for dead. Other errors (EPERM,
-/// etc.) mean the process exists but we lack permission to signal it —
-/// still alive.
-#[cfg(unix)]
-pub fn is_pid_alive(pid: u32) -> bool {
-    use nix::errno::Errno;
-    use nix::sys::signal::kill;
-    use nix::unistd::Pid;
-    match kill(Pid::from_raw(pid as i32), None) {
-        Ok(()) => true,
-        Err(Errno::ESRCH) => false,
-        Err(_) => true,
-    }
-}
-
-#[cfg(not(unix))]
-pub fn is_pid_alive(_pid: u32) -> bool {
-    false
-}
-
 /// Update the `last_attached_at` field in place. Best-effort: any I/O
 /// error is logged and swallowed because attach itself has already
 /// succeeded; the timestamp is purely for observability.
@@ -441,44 +379,6 @@ fn socket_exists(path: &Path) -> bool {
     }
 }
 
-/// Signal the runner's entire process group, then the runner pid itself.
-///
-/// The runner is spawned `setsid` (a fresh session, so it is the leader of
-/// a process group whose id equals its pid), and the agent subprocess plus
-/// the agent's own children (e.g. the node ACP wrapper and the SDK child it
-/// execs) inherit that group. Signalling the group reaps the whole tree in
-/// one shot. Signalling only the runner pid leaves the agent and its
-/// grandchildren orphaned under PID 1, which is the structured view-runner /
-/// `node` / `claude` process leak that accumulated across daemon restarts
-/// and superseded spawns (#1689). The trailing single-pid signal is a
-/// belt-and-suspenders for the unlikely case `setsid` failed and the
-/// runner is not a group leader. Best-effort; errors are ignored.
-#[cfg(unix)]
-fn signal_runner_group(pid: u32, sig: nix::sys::signal::Signal) {
-    use nix::sys::signal::{kill, killpg};
-    use nix::unistd::Pid;
-    let p = Pid::from_raw(pid as i32);
-    let _ = killpg(p, sig);
-    let _ = kill(p, sig);
-}
-
-/// SIGTERM the runner's process group (runner + agent + grandchildren).
-pub fn terminate_runner_group(pid: u32) {
-    #[cfg(unix)]
-    signal_runner_group(pid, nix::sys::signal::Signal::SIGTERM);
-    #[cfg(not(unix))]
-    let _ = pid;
-}
-
-/// SIGKILL the runner's process group; the escalation path when SIGTERM
-/// does not take.
-pub fn kill_runner_group(pid: u32) {
-    #[cfg(unix)]
-    signal_runner_group(pid, nix::sys::signal::Signal::SIGKILL);
-    #[cfg(not(unix))]
-    let _ = pid;
-}
-
 /// Reap the runner for `session_id`: SIGTERM its whole process group (if
 /// the registry entry exists), then remove the registry entry and socket.
 /// The canonical teardown used by the supervisor's shutdown paths and by a
@@ -489,61 +389,9 @@ pub fn kill_runner_group(pid: u32) {
 /// already-empty group is a harmless no-op. See #1689.
 pub fn terminate(session_id: &str) {
     if let Ok(Some(record)) = load(session_id) {
-        terminate_runner_group(record.pid);
+        crate::process::worker::terminate_process_group(record.pid);
     }
     delete(session_id).ok();
-}
-
-/// Reap a runner process group with SIGKILL escalation: SIGTERM the group,
-/// wait `grace` for it to exit, then SIGKILL the group. A bare SIGTERM can
-/// leave a node/`claude` grandchild that ignores it alive under PID 1, so
-/// the escalation is what actually guarantees the tree dies. `killpg`
-/// ignores ESRCH, so the SIGKILL on an already-empty group is a no-op.
-/// Used by the boot reconciler's orphan sweep. See #1921.
-#[cfg(unix)]
-pub async fn reap_group_escalating(pid: u32, grace: std::time::Duration) {
-    terminate_runner_group(pid);
-    tokio::time::sleep(grace).await;
-    kill_runner_group(pid);
-}
-
-/// What this runner's own registry record looks like from its watchdog's
-/// point of view. Computed from a non-creating read of a path captured at
-/// startup; see [`inspect_record_for_runner`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunnerRecordState {
-    /// Record present and its `pid` matches ours: we are still the owner.
-    Matches,
-    /// Record file is gone (HOME deleted, or a daemon `delete`d it).
-    Missing,
-    /// Record present but owned by a different pid: a fresh runner has
-    /// superseded us (delete + respawn). We must exit without touching the
-    /// files, which now belong to the new owner.
-    Superseded,
-    /// Read or parse failed for a reason other than absence. Treated as
-    /// non-fatal (transient FS hiccup) by the watchdog.
-    Unreadable,
-}
-
-/// Inspect this runner's registry record WITHOUT creating the workers dir.
-///
-/// The watchdog cannot use [`load`], because `load` -> `record_path` ->
-/// `workers_dir` calls `create_dir_all`, which would recreate the very
-/// directory whose deletion is the watchdog's primary self-destruct signal
-/// (and resurrect a temp `$HOME` a test just removed). The caller captures
-/// the concrete `<session_id>.json` path once at startup, while the dir
-/// still exists, and polls it here. See #1921.
-pub fn inspect_record_for_runner(record_path: &Path, own_pid: u32) -> RunnerRecordState {
-    let bytes = match std::fs::read(record_path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return RunnerRecordState::Missing,
-        Err(_) => return RunnerRecordState::Unreadable,
-    };
-    match serde_json::from_slice::<WorkerRecord>(&bytes) {
-        Ok(rec) if rec.pid == own_pid => RunnerRecordState::Matches,
-        Ok(_) => RunnerRecordState::Superseded,
-        Err(_) => RunnerRecordState::Unreadable,
-    }
 }
 
 #[cfg(test)]

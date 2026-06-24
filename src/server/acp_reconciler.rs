@@ -1427,7 +1427,7 @@ async fn sweep_orphan_workers(state: &Arc<AppState>, live: &HashSet<&String>) {
         // signal; the next daemon boot re-sweeps it, so this is acceptable.
         // See #1921.
         #[cfg(unix)]
-        tokio::spawn(crate::acp::worker_registry::reap_group_escalating(
+        tokio::spawn(crate::process::worker::reap_group_escalating(
             record.pid,
             std::time::Duration::from_secs(2),
         ));

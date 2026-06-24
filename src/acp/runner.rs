@@ -58,7 +58,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use super::worker_registry::{self, RunnerRecordState, WorkerRecord};
+use super::worker_registry::{self, WorkerRecord};
+use crate::process::worker::RunnerRecordState;
 
 /// How often the abandonment watchdog inspects its own registry record.
 const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -484,7 +485,14 @@ async fn run_watchdog(
             return;
         }
 
-        match worker_registry::inspect_record_for_runner(&record_path, own_pid) {
+        // Parse the pid from our own record format here so `process::worker`
+        // stays payload-agnostic; a parse failure maps to `Unreadable`,
+        // preserving the "malformed record is non-fatal" watchdog semantics.
+        match crate::process::worker::inspect_record_for_runner(&record_path, own_pid, |bytes| {
+            serde_json::from_slice::<WorkerRecord>(bytes)
+                .ok()
+                .map(|rec| rec.pid)
+        }) {
             // Still ours, or a transient read hiccup we shouldn't act on.
             RunnerRecordState::Matches | RunnerRecordState::Unreadable => missing = 0,
             RunnerRecordState::Superseded => {
@@ -564,7 +572,7 @@ async fn self_terminate_agent_tree(
     // actually being the group leader so a failed setsid can't make us
     // SIGKILL the daemon's inherited group.
     if getpgrp() == getpid() {
-        worker_registry::kill_runner_group(own_pid);
+        crate::process::worker::kill_process_group(own_pid);
     } else {
         // setsid failed; we share another group. Never group-kill it. Kill
         // just the direct child and fall through to a normal runner exit.
