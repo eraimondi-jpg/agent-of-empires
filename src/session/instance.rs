@@ -898,6 +898,24 @@ impl Instance {
                 .is_some_and(|w| w.managed_by_aoe)
     }
 
+    /// Whether deleting this session has aoe-managed worktree state to clean
+    /// up, covering BOTH single-repo and multi-repo (workspace) sessions.
+    /// Single-repo sessions carry an aoe-managed `worktree_info`; workspace
+    /// sessions carry `workspace_info` instead (with `worktree_info = None`),
+    /// and opt into cleanup via `cleanup_on_delete`. Entry points use this to
+    /// decide whether to set `delete_worktree`; gating on `worktree_info`
+    /// alone silently leaks the workspace directory (#2363). Mirrors the TUI
+    /// group-delete predicate so every surface agrees.
+    pub fn has_managed_worktree_or_workspace(&self) -> bool {
+        self.worktree_info
+            .as_ref()
+            .is_some_and(|w| w.managed_by_aoe)
+            || self
+                .workspace_info
+                .as_ref()
+                .is_some_and(|ws| ws.cleanup_on_delete)
+    }
+
     /// Stamp `last_accessed_at` to the current time AND wake the session
     /// from any sink state. Call this on user-initiated interactions
     /// (attach, send keys, etc.); every existing call site already does.
@@ -5266,6 +5284,48 @@ mod tests {
         let wt = deserialized.worktree_info.unwrap();
         assert_eq!(wt.branch, "feature/abc");
         assert!(wt.managed_by_aoe);
+    }
+
+    #[test]
+    fn has_managed_worktree_or_workspace_covers_both_shapes() {
+        // Single-repo aoe-managed worktree.
+        let mut wt = Instance::new("WT", "/tmp/wt");
+        wt.worktree_info = Some(WorktreeInfo {
+            branch: "feature/abc".to_string(),
+            main_repo_path: "/tmp/main".to_string(),
+            managed_by_aoe: true,
+            created_at: Utc::now(),
+            base_branch: None,
+        });
+        assert!(wt.has_managed_worktree_or_workspace());
+
+        // Multi-repo workspace opting into cleanup (worktree_info is None).
+        let mut ws = Instance::new("WS", "/tmp/ws/repo-a");
+        ws.workspace_info = Some(WorkspaceInfo {
+            branch: "feature/abc".to_string(),
+            workspace_dir: "/tmp/ws".to_string(),
+            repos: vec![WorkspaceRepo {
+                name: "repo-a".to_string(),
+                source_path: "/tmp/src/repo-a".to_string(),
+                branch: "feature/abc".to_string(),
+                worktree_path: "/tmp/ws/repo-a".to_string(),
+                main_repo_path: "/tmp/src/repo-a".to_string(),
+                managed_by_aoe: true,
+            }],
+            created_at: Utc::now(),
+            cleanup_on_delete: true,
+        });
+        assert!(ws.has_managed_worktree_or_workspace());
+
+        // Workspace that opted out of cleanup: nothing to clean.
+        if let Some(info) = ws.workspace_info.as_mut() {
+            info.cleanup_on_delete = false;
+        }
+        assert!(!ws.has_managed_worktree_or_workspace());
+
+        // Plain session: neither worktree nor workspace.
+        let plain = Instance::new("Plain", "/tmp/plain");
+        assert!(!plain.has_managed_worktree_or_workspace());
     }
 
     #[test]

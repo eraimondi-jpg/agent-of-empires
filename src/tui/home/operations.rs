@@ -631,24 +631,10 @@ impl HomeView {
 
             for session_id in &sessions_to_delete {
                 if let Some(inst) = self.get_instance(session_id) {
-                    let delete_worktree = options.delete_worktrees
-                        && (inst
-                            .worktree_info
-                            .as_ref()
-                            .is_some_and(|wt| wt.managed_by_aoe)
-                            || inst
-                                .workspace_info
-                                .as_ref()
-                                .is_some_and(|ws| ws.cleanup_on_delete));
-                    let delete_branch = options.delete_branches
-                        && (inst
-                            .worktree_info
-                            .as_ref()
-                            .is_some_and(|wt| wt.managed_by_aoe)
-                            || inst
-                                .workspace_info
-                                .as_ref()
-                                .is_some_and(|ws| ws.cleanup_on_delete));
+                    let delete_worktree =
+                        options.delete_worktrees && inst.has_managed_worktree_or_workspace();
+                    let delete_branch =
+                        options.delete_branches && inst.has_managed_worktree_or_workspace();
                     let delete_sandbox = options.delete_containers
                         && inst.sandbox_info.as_ref().is_some_and(|s| s.enabled);
                     let request = DeletionRequest {

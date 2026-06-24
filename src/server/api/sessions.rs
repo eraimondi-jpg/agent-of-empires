@@ -306,10 +306,7 @@ impl SessionResponse {
             // Surface the marker (omitted when read); the web gates the
             // visual on the `session.unread_indicator` setting.
             unread: inst.unread,
-            has_managed_worktree: inst
-                .worktree_info
-                .as_ref()
-                .is_some_and(|w| w.managed_by_aoe),
+            has_managed_worktree: inst.has_managed_worktree_or_workspace(),
             // Overlaid per-profile in list_sessions; see the field doc.
             tie_workdir_to_name: false,
             // Overlaid in list_sessions; single-session responses stay inactive.
@@ -5234,6 +5231,35 @@ mod tests {
         upsert_instance(&mut instances, other);
         assert_eq!(instances.len(), 2);
         assert!(instances.iter().any(|i| i.id == other_id));
+    }
+
+    // Regression for #2363: a multi-repo workspace session carries
+    // `workspace_info` and no `worktree_info`. The DTO must still report
+    // `has_managed_worktree: true`, otherwise the web delete dialog hides the
+    // "Delete worktree" checkbox and the workspace directory leaks on disk.
+    #[test]
+    fn from_instance_reports_managed_worktree_for_workspace_session() {
+        let mut inst = make_test_instance();
+        inst.workspace_info = Some(crate::session::WorkspaceInfo {
+            branch: "feature/abc".to_string(),
+            workspace_dir: "/tmp/ws".to_string(),
+            repos: vec![crate::session::WorkspaceRepo {
+                name: "repo-a".to_string(),
+                source_path: "/tmp/src/repo-a".to_string(),
+                branch: "feature/abc".to_string(),
+                worktree_path: "/tmp/ws/repo-a".to_string(),
+                main_repo_path: "/tmp/src/repo-a".to_string(),
+                managed_by_aoe: true,
+            }],
+            created_at: chrono::Utc::now(),
+            cleanup_on_delete: true,
+        });
+
+        let resp = SessionResponse::from_instance(&inst, false);
+        assert!(
+            resp.has_managed_worktree,
+            "workspace session must report a managed worktree"
+        );
     }
 
     #[test]

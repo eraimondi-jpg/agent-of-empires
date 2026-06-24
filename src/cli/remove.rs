@@ -35,9 +35,7 @@ pub struct RemoveArgs {
 }
 
 fn needs_worktree_cleanup(inst: &Instance, args: &RemoveArgs) -> bool {
-    inst.worktree_info
-        .as_ref()
-        .is_some_and(|wt| wt.managed_by_aoe && args.delete_worktree)
+    args.delete_worktree && inst.has_managed_worktree_or_workspace()
 }
 
 #[tracing::instrument(target = "cli.session", skip_all, fields(profile = %profile))]
@@ -91,11 +89,20 @@ pub async fn run(profile: &str, args: RemoveArgs) -> Result<()> {
     }
 
     if !delete_worktree {
-        if let Some(wt_info) = &inst.worktree_info {
-            if wt_info.managed_by_aoe {
+        if inst
+            .worktree_info
+            .as_ref()
+            .is_some_and(|wt| wt.managed_by_aoe)
+        {
+            println!(
+                "Worktree preserved at: {} (use --delete-worktree to remove)",
+                inst.project_path
+            );
+        } else if let Some(ws_info) = &inst.workspace_info {
+            if ws_info.cleanup_on_delete {
                 println!(
-                    "Worktree preserved at: {} (use --delete-worktree to remove)",
-                    inst.project_path
+                    "Workspace preserved at: {} (use --delete-worktree to remove)",
+                    ws_info.workspace_dir
                 );
             }
         }
@@ -136,4 +143,47 @@ pub async fn run(profile: &str, args: RemoveArgs) -> Result<()> {
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::{WorkspaceInfo, WorkspaceRepo};
+    use chrono::Utc;
+
+    fn args(delete_worktree: bool) -> RemoveArgs {
+        RemoveArgs {
+            identifier: "x".to_string(),
+            delete_worktree,
+            delete_branch: false,
+            force: false,
+            keep_container: false,
+            keep_scratch: false,
+        }
+    }
+
+    // Regression for #2363: a multi-repo workspace session has no
+    // `worktree_info`, so the old worktree_info-only check returned false and
+    // `--delete-worktree` silently left the workspace dir on disk.
+    #[test]
+    fn needs_worktree_cleanup_true_for_workspace_session() {
+        let mut inst = Instance::new("WS", "/tmp/ws/repo-a");
+        inst.workspace_info = Some(WorkspaceInfo {
+            branch: "feature/abc".to_string(),
+            workspace_dir: "/tmp/ws".to_string(),
+            repos: vec![WorkspaceRepo {
+                name: "repo-a".to_string(),
+                source_path: "/tmp/src/repo-a".to_string(),
+                branch: "feature/abc".to_string(),
+                worktree_path: "/tmp/ws/repo-a".to_string(),
+                main_repo_path: "/tmp/src/repo-a".to_string(),
+                managed_by_aoe: true,
+            }],
+            created_at: Utc::now(),
+            cleanup_on_delete: true,
+        });
+
+        assert!(needs_worktree_cleanup(&inst, &args(true)));
+        assert!(!needs_worktree_cleanup(&inst, &args(false)));
+    }
 }
