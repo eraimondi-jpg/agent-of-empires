@@ -56,6 +56,7 @@ use tracing::{debug, trace, warn};
 
 use super::approvals::Nonce;
 use super::state::{Event, Plan, RateLimitInfo};
+use crate::events::{self, Order, SeqBound};
 
 /// Externally-tagged JSON discriminants for non-substantive structured view
 /// events: lifecycle and metadata snapshots the agent emits once per
@@ -71,16 +72,6 @@ const NON_SUBSTANTIVE_EVENT_DISCRIMINANTS: &[&str] = &[
     "AcpSessionAssigned",
     "PromptCapabilities",
 ];
-
-/// Build the `AND event_json NOT LIKE '{"Name":%'` SQL fragment for every
-/// non-substantive discriminant, newline-joined for readable queries.
-fn non_substantive_not_like_clauses() -> String {
-    NON_SUBSTANTIVE_EVENT_DISCRIMINANTS
-        .iter()
-        .map(|name| format!("AND event_json NOT LIKE '{{\"{name}\":%'"))
-        .collect::<Vec<_>>()
-        .join("\n               ")
-}
 
 /// One page of replayed events plus the cursor metadata a paginating
 /// client needs to fetch the next page.
@@ -118,42 +109,17 @@ fn is_user_turn_boundary(ev: &Event) -> bool {
     )
 }
 
-/// Highest seq stored for `session_id`, or 0 if none. Free fn so both
-/// the public [`EventStore::highest_seq`] and the single-snapshot
-/// [`EventStore::replay_page`] can share it under one held lock.
-fn query_highest_seq(conn: &Connection, session_id: &str) -> u64 {
-    match conn
-        .query_row(
-            "SELECT MAX(seq) FROM acp_events WHERE session_id = ?1",
-            params![session_id],
-            |row| row.get::<_, Option<i64>>(0),
-        )
-        .optional()
-    {
-        Ok(Some(Some(max))) => max as u64,
-        _ => 0,
-    }
-}
-
-/// Lowest seq still stored for `session_id`, or `None` when empty.
-/// Companion to [`query_highest_seq`].
-fn query_lowest_seq(conn: &Connection, session_id: &str) -> Option<u64> {
-    match conn
-        .query_row(
-            "SELECT MIN(seq) FROM acp_events WHERE session_id = ?1",
-            params![session_id],
-            |row| row.get::<_, Option<i64>>(0),
-        )
-        .optional()
-    {
-        Ok(Some(Some(m))) => Some(m as u64),
-        _ => None,
-    }
-}
-
 /// SQLite-backed structured view event log. One row per (session_id, seq).
+///
+/// The generic storage mechanics (schema, append, retention prune, keyset
+/// scans, seq bookkeeping, attachment blobs, topic deletion) live in
+/// `crate::events`; this type is the ACP consumer: it owns the connection,
+/// serializes/deserializes the `Event` payload, and keeps the ACP-specific
+/// replay semantics and `json_extract` accessors. The dependency arrow runs
+/// acp -> events.
 pub struct EventStore {
     conn: Mutex<Connection>,
+    schema: events::Schema,
     /// Per-session retention cap. Older events are pruned on insert
     /// once the count exceeds this value. Bytes are not enforced here
     /// (the in-memory ring still has a byte cap); the row count keeps
@@ -167,49 +133,10 @@ impl EventStore {
     /// enabled so concurrent writers (publish path) and readers
     /// (replay endpoint) don't block each other.
     pub fn open(db_path: &Path, max_events_per_session: usize) -> Result<Self> {
-        if let Some(parent) = db_path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!(
-                        "create parent dir for structured view DB at {}",
-                        parent.display()
-                    )
-                })?;
-            }
-        }
-        let conn = Connection::open(db_path)
-            .with_context(|| format!("open structured view DB at {}", db_path.display()))?;
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .context("enable WAL mode")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")
-            .context("set synchronous=NORMAL")?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS acp_events (
-                session_id  TEXT    NOT NULL,
-                seq         INTEGER NOT NULL,
-                event_json  TEXT    NOT NULL,
-                created_at  INTEGER NOT NULL,
-                PRIMARY KEY (session_id, seq)
-            );
-            CREATE INDEX IF NOT EXISTS idx_acp_events_session_seq
-                ON acp_events(session_id, seq);
-            CREATE INDEX IF NOT EXISTS idx_acp_events_session_created_at
-                ON acp_events(session_id, created_at);
-            CREATE TABLE IF NOT EXISTS acp_attachments (
-                session_id    TEXT    NOT NULL,
-                seq           INTEGER NOT NULL,
-                attachment_id TEXT    NOT NULL,
-                kind          TEXT    NOT NULL,
-                mime_type     TEXT    NOT NULL,
-                name          TEXT,
-                data          BLOB    NOT NULL,
-                created_at    INTEGER NOT NULL,
-                PRIMARY KEY (session_id, attachment_id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_acp_attachments_session_seq
-                ON acp_attachments(session_id, seq);",
-        )
-        .context("create acp_events schema")?;
+        // Prefix "acp" maps to the existing acp_events / acp_attachments
+        // tables, so an established database opens unchanged (no migration).
+        let schema = events::Schema::new("acp")?;
+        let conn = events::open(db_path, &schema)?;
         debug!(
             target: "acp.event_store",
             path = %db_path.display(),
@@ -218,6 +145,7 @@ impl EventStore {
         );
         Ok(Self {
             conn: Mutex::new(conn),
+            schema,
             max_events_per_session,
         })
     }
@@ -238,13 +166,7 @@ impl EventStore {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        let inserted = conn
-            .execute(
-                "INSERT OR IGNORE INTO acp_events (session_id, seq, event_json, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-                params![session_id, seq as i64, json, now_ms],
-            )
-            .with_context(|| format!("insert {session_id}@{seq}"))?;
+        let inserted = events::insert_event(&conn, &self.schema, session_id, seq, &json, now_ms)?;
         if inserted == 0 {
             // Primary-key collision: same (session_id, seq) seen before.
             // Logged at trace because the cause is usually a benign retry
@@ -269,80 +191,20 @@ impl EventStore {
                 "recorded event"
             );
         }
-        // Prune oldest beyond the retention cap. Cheap when below the cap
-        // (the subquery returns 0 rows). We do it on every insert rather
-        // than periodically so the upper bound on per-session disk usage
-        // is strict rather than amortised.
-        //
-        // Snapshot events (the slash-command list, mode list, ACP session
-        // id) are exempt from pruning: the agent only emits them once per
-        // session lifecycle, near the start of the seq range, so a long
-        // session blows past the cap and evicts them; leaving the
-        // composer's `/` palette and the mode picker empty on reconnect.
-        // See #1049. The `event_json NOT LIKE` clauses match the
-        // externally-tagged JSON discriminant for each pinned variant.
-        if self.max_events_per_session > 0 {
-            // Compute the prune cutoff seq once so the events delete and
-            // the attachments delete agree on the same threshold. Doing
-            // the events delete first would shift the OFFSET row out from
-            // under the attachments delete and leave orphaned blobs.
-            let cutoff: Option<i64> = conn
-                .query_row(
-                    "SELECT seq FROM acp_events
-                     WHERE session_id = ?1
-                     ORDER BY seq DESC
-                     LIMIT 1 OFFSET ?2",
-                    params![session_id, self.max_events_per_session as i64],
-                    |row| row.get(0),
-                )
-                .optional()
-                .unwrap_or(None);
-            if let Some(cutoff) = cutoff {
-                // The `non_substantive_not_like_clauses()` helper pins the
-                // snapshot variants (slash-command list, mode list, ACP
-                // session id) so a long session can't evict them. See #1049.
-                let prune_sql = format!(
-                    "DELETE FROM acp_events
-                     WHERE session_id = ?1
-                       AND seq <= ?2
-                       {clauses}",
-                    clauses = non_substantive_not_like_clauses()
-                );
-                match conn.execute(&prune_sql, params![session_id, cutoff]) {
-                    Ok(0) => {}
-                    Ok(pruned) => {
-                        trace!(
-                            target: "acp.event_store",
-                            session = %session_id,
-                            pruned,
-                            cap = self.max_events_per_session,
-                            "pruned oldest events past retention cap"
-                        );
-                    }
-                    Err(e) => {
-                        // Prune failure isn't fatal; the row is recorded,
-                        // we just exceed the cap until the next prune
-                        // succeeds. Log + swallow so callers don't have to
-                        // distinguish "record failed" from "trim failed".
-                        warn!(target: "acp.event_store", "prune {session_id}: {e}");
-                    }
-                }
-                // Drop attachment blobs whose owning UserPromptSent has
-                // (or is about to be) pruned. Attachments only ever hang
-                // off prompts, never the pinned snapshot variants, so a
-                // flat `seq <= cutoff` delete cannot strand a blob whose
-                // event survived. This is what keeps the attachment table
-                // bounded alongside the event log rather than growing
-                // without limit as screenshots accumulate.
-                if let Err(e) = conn.execute(
-                    "DELETE FROM acp_attachments
-                     WHERE session_id = ?1 AND seq <= ?2",
-                    params![session_id, cutoff],
-                ) {
-                    warn!(target: "acp.event_store", "prune attachments {session_id}: {e}");
-                }
-            }
-        }
+        // Prune oldest beyond the retention cap on every insert so the
+        // per-session disk bound stays strict rather than amortised.
+        // NON_SUBSTANTIVE_EVENT_DISCRIMINANTS are exempt: the agent emits
+        // those snapshot events (slash-command list, mode list, ACP session
+        // id) once per session lifecycle near the start of the seq range, so
+        // a long session would otherwise evict them and leave the composer's
+        // `/` palette and the mode picker empty on reconnect. See #1049.
+        events::prune_retention(
+            &conn,
+            &self.schema,
+            session_id,
+            self.max_events_per_session,
+            NON_SUBSTANTIVE_EVENT_DISCRIMINANTS,
+        );
         Ok(())
     }
 
@@ -355,42 +217,26 @@ impl EventStore {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        let mut stmt = match conn.prepare(
-            "SELECT seq, event_json FROM acp_events
-             WHERE session_id = ?1 AND seq < ?2
-             ORDER BY seq ASC",
-        ) {
-            Ok(s) => s,
+        events::scan(
+            &conn,
+            &self.schema,
+            session_id,
+            SeqBound::Before(before),
+            Order::Asc,
+            None,
+        )
+        .into_iter()
+        .filter_map(|(seq, json)| match serde_json::from_str::<Event>(&json) {
+            Ok(event) => Some((seq, event)),
             Err(e) => {
-                warn!(target: "acp.event_store", "prepare replay_before for {session_id}: {e}");
-                return Vec::new();
+                warn!(
+                    target: "acp.event_store",
+                    "deserialise event {session_id}@{seq}: {e}"
+                );
+                None
             }
-        };
-        let rows = match stmt.query_map(params![session_id, before as i64], |row| {
-            let seq: i64 = row.get(0)?;
-            let json: String = row.get(1)?;
-            Ok((seq as u64, json))
-        }) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(target: "acp.event_store", "query replay_before for {session_id}: {e}");
-                return Vec::new();
-            }
-        };
-        let mut out = Vec::new();
-        for row in rows {
-            match row {
-                Ok((seq, json)) => match serde_json::from_str::<Event>(&json) {
-                    Ok(event) => out.push((seq, event)),
-                    Err(e) => warn!(
-                        target: "acp.event_store",
-                        "deserialise event {session_id}@{seq}: {e}"
-                    ),
-                },
-                Err(e) => warn!(target: "acp.event_store", "row error: {e}"),
-            }
-        }
-        out
+        })
+        .collect()
     }
 
     /// Return all events for `session_id` with `seq > since`, oldest
@@ -422,88 +268,39 @@ impl EventStore {
         // land between these reads and the page query and make
         // `has_more`/`highest_seq` disagree (which would let the client's
         // paging cap stop early). See #1705 review.
-        let highest_seq = query_highest_seq(&conn, session_id);
-        let lowest_seq = query_lowest_seq(&conn, session_id);
-        // `seq` is a signed SQLite column; clamp before the cast so the
-        // status probe's `since = u64::MAX` doesn't wrap to -1 and match
-        // every row (`seq > -1`) instead of returning an empty page.
-        let since_i64 = i64::try_from(since).unwrap_or(i64::MAX);
-        // Probe one extra row beyond `limit` to detect `has_more` without
-        // a second query against `highest_seq`.
+        let highest_seq = events::highest_seq(&conn, &self.schema, session_id);
+        let lowest_seq = events::lowest_seq(&conn, &self.schema, session_id);
+        // Probe one extra row beyond `limit` to detect `has_more` without a
+        // second query against `highest_seq`. The signed-column clamp for a
+        // `u64::MAX` cursor lives in `events::scan`.
         let probe = limit.map(|n| n.saturating_add(1));
-        let sql = match probe {
-            Some(_) => {
-                "SELECT seq, event_json FROM acp_events
-                 WHERE session_id = ?1 AND seq > ?2
-                 ORDER BY seq ASC LIMIT ?3"
-            }
-            None => {
-                "SELECT seq, event_json FROM acp_events
-                 WHERE session_id = ?1 AND seq > ?2
-                 ORDER BY seq ASC"
-            }
-        };
-        let mut stmt = match conn.prepare(sql) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(target: "acp.event_store", "prepare replay for {session_id}: {e}");
-                return ReplayPage {
-                    events: Vec::new(),
-                    last_scanned_seq: None,
-                    has_more: false,
-                    highest_seq,
-                    lowest_seq,
-                };
-            }
-        };
-        let map_row = |row: &rusqlite::Row| {
-            let seq: i64 = row.get(0)?;
-            let json: String = row.get(1)?;
-            Ok((seq as u64, json))
-        };
-        let rows = match probe {
-            Some(p) => stmt.query_map(params![session_id, since_i64, p as i64], map_row),
-            None => stmt.query_map(params![session_id, since_i64], map_row),
-        };
-        let rows = match rows {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(target: "acp.event_store", "query replay for {session_id}: {e}");
-                return ReplayPage {
-                    events: Vec::new(),
-                    last_scanned_seq: None,
-                    has_more: false,
-                    highest_seq,
-                    lowest_seq,
-                };
-            }
-        };
+        let rows = events::scan(
+            &conn,
+            &self.schema,
+            session_id,
+            SeqBound::After(since),
+            Order::Asc,
+            probe,
+        );
         let mut out = Vec::new();
         let mut last_scanned_seq = None;
-        let mut scanned = 0usize;
         let mut has_more = false;
-        for row in rows {
-            match row {
-                Ok((seq, json)) => {
-                    // The probe row proves another page exists; don't
-                    // consume it or advance the cursor onto it.
-                    if let Some(n) = limit {
-                        if scanned == n {
-                            has_more = true;
-                            break;
-                        }
-                    }
-                    scanned += 1;
-                    last_scanned_seq = Some(seq);
-                    match serde_json::from_str::<Event>(&json) {
-                        Ok(event) => out.push((seq, event)),
-                        Err(e) => warn!(
-                            target: "acp.event_store",
-                            "deserialise event {session_id}@{seq}: {e}"
-                        ),
-                    }
+        for (scanned, (seq, json)) in rows.into_iter().enumerate() {
+            // The probe row proves another page exists; don't consume it or
+            // advance the cursor onto it.
+            if let Some(n) = limit {
+                if scanned == n {
+                    has_more = true;
+                    break;
                 }
-                Err(e) => warn!(target: "acp.event_store", "row error: {e}"),
+            }
+            last_scanned_seq = Some(seq);
+            match serde_json::from_str::<Event>(&json) {
+                Ok(event) => out.push((seq, event)),
+                Err(e) => warn!(
+                    target: "acp.event_store",
+                    "deserialise event {session_id}@{seq}: {e}"
+                ),
             }
         }
         trace!(
@@ -549,89 +346,42 @@ impl EventStore {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        let highest_seq = query_highest_seq(&conn, session_id);
-        let lowest_seq = query_lowest_seq(&conn, session_id);
-        // `seq` is a signed SQLite column; clamp before the cast so the
-        // tail request's `before = u64::MAX` stays positive (`seq < MAX`
-        // matches everything) instead of wrapping to a negative bound.
-        let before_i64 = i64::try_from(before).unwrap_or(i64::MAX);
+        let highest_seq = events::highest_seq(&conn, &self.schema, session_id);
+        let lowest_seq = events::lowest_seq(&conn, &self.schema, session_id);
+        // Probe one extra row beyond `limit` to detect `has_more`. The
+        // signed-column clamp for a `u64::MAX` tail cursor lives in
+        // `events::scan`.
         let probe = limit.map(|n| n.saturating_add(1));
-        let sql = match probe {
-            Some(_) => {
-                "SELECT seq, event_json FROM acp_events
-                 WHERE session_id = ?1 AND seq < ?2
-                 ORDER BY seq DESC LIMIT ?3"
-            }
-            None => {
-                "SELECT seq, event_json FROM acp_events
-                 WHERE session_id = ?1 AND seq < ?2
-                 ORDER BY seq DESC"
-            }
-        };
-        let mut stmt = match conn.prepare(sql) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(target: "acp.event_store", "prepare replay_page_before for {session_id}: {e}");
-                return ReplayPage {
-                    events: Vec::new(),
-                    last_scanned_seq: None,
-                    has_more: false,
-                    highest_seq,
-                    lowest_seq,
-                };
-            }
-        };
-        let map_row = |row: &rusqlite::Row| {
-            let seq: i64 = row.get(0)?;
-            let json: String = row.get(1)?;
-            Ok((seq as u64, json))
-        };
-        let rows = match probe {
-            Some(p) => stmt.query_map(params![session_id, before_i64, p as i64], map_row),
-            None => stmt.query_map(params![session_id, before_i64], map_row),
-        };
-        let rows = match rows {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(target: "acp.event_store", "query replay_page_before for {session_id}: {e}");
-                return ReplayPage {
-                    events: Vec::new(),
-                    last_scanned_seq: None,
-                    has_more: false,
-                    highest_seq,
-                    lowest_seq,
-                };
-            }
-        };
+        let rows = events::scan(
+            &conn,
+            &self.schema,
+            session_id,
+            SeqBound::Before(before),
+            Order::Desc,
+            probe,
+        );
         let mut out = Vec::new();
         let mut last_scanned_seq = None;
-        let mut scanned = 0usize;
         let mut has_more = false;
-        for row in rows {
-            match row {
-                Ok((seq, json)) => {
-                    // The probe row proves an older page exists; don't
-                    // consume it or move the cursor onto it.
-                    if let Some(n) = limit {
-                        if scanned == n {
-                            has_more = true;
-                            break;
-                        }
-                    }
-                    scanned += 1;
-                    // DESC scan, so each consumed row's seq is lower than
-                    // the last; the final one is the page's lowest, which
-                    // is the cursor for the next-older page.
-                    last_scanned_seq = Some(seq);
-                    match serde_json::from_str::<Event>(&json) {
-                        Ok(event) => out.push((seq, event)),
-                        Err(e) => warn!(
-                            target: "acp.event_store",
-                            "deserialise event {session_id}@{seq}: {e}"
-                        ),
-                    }
+        for (scanned, (seq, json)) in rows.into_iter().enumerate() {
+            // The probe row proves an older page exists; don't consume it or
+            // move the cursor onto it.
+            if let Some(n) = limit {
+                if scanned == n {
+                    has_more = true;
+                    break;
                 }
-                Err(e) => warn!(target: "acp.event_store", "row error: {e}"),
+            }
+            // DESC scan, so each consumed row's seq is lower than the last;
+            // the final one is the page's lowest, which is the cursor for
+            // the next-older page.
+            last_scanned_seq = Some(seq);
+            match serde_json::from_str::<Event>(&json) {
+                Ok(event) => out.push((seq, event)),
+                Err(e) => warn!(
+                    target: "acp.event_store",
+                    "deserialise event {session_id}@{seq}: {e}"
+                ),
             }
         }
         // Scanned newest-first; callers expect oldest-first.
@@ -1062,7 +812,7 @@ impl EventStore {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        let max = query_highest_seq(&conn, session_id);
+        let max = events::highest_seq(&conn, &self.schema, session_id);
         trace!(
             target: "acp.event_store",
             session = %session_id,
@@ -1082,7 +832,7 @@ impl EventStore {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        let min = query_lowest_seq(&conn, session_id);
+        let min = events::lowest_seq(&conn, &self.schema, session_id);
         trace!(
             target: "acp.event_store",
             session = %session_id,
@@ -1100,26 +850,7 @@ impl EventStore {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        let mut stmt =
-            match conn.prepare("SELECT session_id, MAX(seq) FROM acp_events GROUP BY session_id") {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!(target: "acp.event_store", "prepare all_session_seqs: {e}");
-                    return Vec::new();
-                }
-            };
-        let rows = match stmt.query_map([], |row| {
-            let id: String = row.get(0)?;
-            let max: i64 = row.get(1)?;
-            Ok((id, max as u64))
-        }) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(target: "acp.event_store", "query all_session_seqs: {e}");
-                return Vec::new();
-            }
-        };
-        let collected: Vec<(String, u64)> = rows.filter_map(|r| r.ok()).collect();
+        let collected = events::all_topic_seqs(&conn, &self.schema);
         debug!(
             target: "acp.event_store",
             sessions = collected.len(),
@@ -1361,17 +1092,6 @@ impl EventStore {
         &self,
         session_ids: &[String],
     ) -> std::collections::HashMap<String, i64> {
-        let mut out = std::collections::HashMap::new();
-        if session_ids.is_empty() {
-            return out;
-        }
-        let conn = match self.conn.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        let placeholders = std::iter::repeat_n("?", session_ids.len())
-            .collect::<Vec<_>>()
-            .join(",");
         // Exclude non-substantive lifecycle/metadata events so they do not
         // reset the idle clock. AcpSessionAssigned in particular is emitted
         // on every cold-start resume (acp_client.rs), so counting it would
@@ -1379,41 +1099,19 @@ impl EventStore {
         // and the idle-reap (#1689) would never fire across restarts. Shares
         // NON_SUBSTANTIVE_EVENT_DISCRIMINANTS with the retention prune so the
         // two predicates cannot desync.
-        let sql = format!(
-            "SELECT session_id, MAX(created_at) FROM acp_events
-             WHERE session_id IN ({placeholders})
-               {clauses}
-             GROUP BY session_id",
-            clauses = non_substantive_not_like_clauses()
-        );
-        let mut stmt = match conn.prepare(&sql) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(target: "acp.event_store", "last_event_at_for_sessions prepare: {e}");
-                return out;
-            }
-        };
-        let rows = stmt.query_map(rusqlite::params_from_iter(session_ids.iter()), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        });
-        match rows {
-            Ok(iter) => {
-                for r in iter {
-                    match r {
-                        Ok((session_id, created_at)) => {
-                            out.insert(session_id, created_at);
-                        }
-                        Err(e) => {
-                            warn!(target: "acp.event_store", "last_event_at_for_sessions row: {e}");
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(target: "acp.event_store", "last_event_at_for_sessions query: {e}");
-            }
+        if session_ids.is_empty() {
+            return std::collections::HashMap::new();
         }
-        out
+        let conn = match self.conn.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        events::last_event_at_for_topics(
+            &conn,
+            &self.schema,
+            session_ids,
+            NON_SUBSTANTIVE_EVENT_DISCRIMINANTS,
+        )
     }
 
     /// Persist one decoded attachment blob, keyed to the seq of the
@@ -1433,30 +1131,18 @@ impl EventStore {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        if let Err(e) = conn.execute(
-            "INSERT OR IGNORE INTO acp_attachments
-                (session_id, seq, attachment_id, kind, mime_type, name, data, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                session_id,
-                seq as i64,
-                blob.id,
-                blob.kind.as_str(),
-                blob.mime_type,
-                blob.name,
-                blob.data,
-                now_ms,
-            ],
-        ) {
-            warn!(
-                target: "acp.event_store",
-                session = %session_id,
-                attachment = %blob.id,
-                "insert attachment failed: {e}"
-            );
-            return false;
-        }
-        true
+        events::insert_attachment(
+            &conn,
+            &self.schema,
+            session_id,
+            seq,
+            &blob.id,
+            blob.kind.as_str(),
+            &blob.mime_type,
+            blob.name.as_deref(),
+            &blob.data,
+            now_ms,
+        )
     }
 
     /// Drop all attachment blobs owned by one prompt seq. Used as a
@@ -1467,17 +1153,7 @@ impl EventStore {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        if let Err(e) = conn.execute(
-            "DELETE FROM acp_attachments WHERE session_id = ?1 AND seq = ?2",
-            params![session_id, seq as i64],
-        ) {
-            warn!(
-                target: "acp.event_store",
-                session = %session_id,
-                seq,
-                "rollback attachments failed: {e}"
-            );
-        }
+        events::delete_attachments_for_seq(&conn, &self.schema, session_id, seq);
     }
 
     /// Fetch one attachment's MIME type and bytes for the replay GET
@@ -1492,22 +1168,7 @@ impl EventStore {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        conn.query_row(
-            "SELECT mime_type, data FROM acp_attachments
-             WHERE session_id = ?1 AND attachment_id = ?2",
-            params![session_id, attachment_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )
-        .optional()
-        .unwrap_or_else(|e| {
-            warn!(
-                target: "acp.event_store",
-                session = %session_id,
-                attachment = %attachment_id,
-                "load attachment failed: {e}"
-            );
-            None
-        })
+        events::load_attachment(&conn, &self.schema, session_id, attachment_id)
     }
 
     /// Latest prompt capabilities the agent advertised for this session,
@@ -1549,30 +1210,15 @@ impl EventStore {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        match conn.execute(
-            "DELETE FROM acp_events WHERE session_id = ?1",
-            params![session_id],
-        ) {
-            Ok(deleted) => {
-                debug!(
-                    target: "acp.event_store",
-                    session = %session_id,
-                    deleted,
-                    "deleted session events"
-                );
-            }
-            Err(e) => {
-                warn!(target: "acp.event_store", "delete {session_id}: {e}");
-            }
-        }
-        // Cascade to attachment blobs so a deleted session leaves no
+        // Cascades to attachment blobs so a deleted session leaves no
         // orphaned bytes behind.
-        if let Err(e) = conn.execute(
-            "DELETE FROM acp_attachments WHERE session_id = ?1",
-            params![session_id],
-        ) {
-            warn!(target: "acp.event_store", "delete attachments {session_id}: {e}");
-        }
+        let deleted = events::delete_topic(&conn, &self.schema, session_id);
+        debug!(
+            target: "acp.event_store",
+            session = %session_id,
+            deleted,
+            "deleted session events"
+        );
     }
 }
 
