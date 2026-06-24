@@ -706,10 +706,7 @@ impl HomeView {
         self.instances().iter().any(|i| {
             (i.group_path == group_path || i.group_path.starts_with(prefix))
                 && owning_profile.is_none_or(|p| i.source_profile == p)
-                && (i.worktree_info.as_ref().is_some_and(|wt| wt.managed_by_aoe)
-                    || i.workspace_info
-                        .as_ref()
-                        .is_some_and(|ws| ws.cleanup_on_delete))
+                && i.has_managed_worktree_or_workspace()
         })
     }
 

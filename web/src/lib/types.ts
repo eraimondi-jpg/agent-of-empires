@@ -72,6 +72,12 @@ export interface SessionResponse {
    *  session currently open, which also clears the marker. */
   unread?: boolean;
   has_managed_worktree: boolean;
+  /** True when deleting this session has aoe-managed worktree state to clean
+   *  up, covering single-repo worktrees AND multi-repo workspaces. Only the
+   *  delete dialog's worktree/branch checkboxes read this; worktree-only
+   *  actions (Edit workdir) keep reading `has_managed_worktree`. Always sent
+   *  by the server; optional only so existing test fixtures need not set it. */
+  has_cleanable_worktree?: boolean;
   /** True when renaming this session also moves its worktree directory (the
    *  resolved `session.tie_workdir_to_name` for an aoe-managed worktree). The
    *  sidebar uses this to collapse the standalone "edit workdir name" action

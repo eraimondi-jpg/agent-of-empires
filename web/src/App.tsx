@@ -1502,7 +1502,7 @@ function AppContent({ loginRequired, onLogout }: { loginRequired: boolean; onLog
           <DeleteSessionDialog
             sessionTitle={deletingSession.title}
             branchName={deletingSession.branch}
-            hasManagedWorktree={deletingSession.has_managed_worktree}
+            hasManagedWorktree={deletingSession.has_cleanable_worktree ?? false}
             isSandboxed={deletingSession.is_sandboxed}
             isScratch={deletingSession.scratch}
             cleanupDefaults={deletingSession.cleanup_defaults}
