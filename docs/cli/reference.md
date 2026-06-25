@@ -39,6 +39,9 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe context summary`↴](#aoe-context-summary)
 * [`aoe context summaries`↴](#aoe-context-summaries)
 * [`aoe context path`↴](#aoe-context-path)
+* [`aoe curator`↴](#aoe-curator)
+* [`aoe curator run`↴](#aoe-curator-run)
+* [`aoe curator status`↴](#aoe-curator-status)
 * [`aoe group`↴](#aoe-group)
 * [`aoe group list`↴](#aoe-group-list)
 * [`aoe group create`↴](#aoe-group-create)
@@ -124,6 +127,7 @@ Run without arguments to launch the TUI dashboard.
 * `killall` — Force-stop everything aoe is running: the serve daemon, all agent workers, and all aoe tmux sessions. Destructive and unprompted
 * `session` — Manage session lifecycle (start, stop, attach, etc.)
 * `context` — Read and update per-group shared context
+* `curator` — Run and inspect the headless group context curator
 * `group` — Manage groups for organizing sessions
 * `plugin` — Manage plugins (list, info, enable, disable)
 * `profile` — Manage profiles (separate workspaces)
@@ -665,6 +669,44 @@ List all groups with a one-line summary digest
 Print canonical file paths for a group
 
 **Usage:** `aoe context path [OPTIONS]`
+
+###### **Options:**
+
+* `-g`, `--group <GROUP>` — Group path; inferred from the current directory when omitted
+
+
+
+## `aoe curator`
+
+Run and inspect the headless group context curator
+
+**Usage:** `aoe curator <COMMAND>`
+
+###### **Subcommands:**
+
+* `run` — Curate a group's context.md now (forces past the change-gate)
+* `status` — Show a group's curator state and whether a curate is pending
+
+
+
+## `aoe curator run`
+
+Curate a group's context.md now (forces past the change-gate)
+
+**Usage:** `aoe curator run [OPTIONS]`
+
+###### **Options:**
+
+* `-g`, `--group <GROUP>` — Group path; inferred from the current directory when omitted
+* `--agent <AGENT>` — One-shot agent to run the curate with (defaults to `claude`)
+
+
+
+## `aoe curator status`
+
+Show a group's curator state and whether a curate is pending
+
+**Usage:** `aoe curator status [OPTIONS]`
 
 ###### **Options:**
 

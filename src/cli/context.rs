@@ -83,7 +83,7 @@ fn add(profile: &str, args: AddArgs) -> Result<()> {
 }
 
 /// Resolve only the group: explicit flag, else cwd marker, else cwd to instance.
-fn resolve_group(profile: &str, explicit: Option<String>) -> Result<String> {
+pub fn resolve_group(profile: &str, explicit: Option<String>) -> Result<String> {
     if let Some(g) = explicit {
         return Ok(g);
     }
