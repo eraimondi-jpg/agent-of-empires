@@ -32,12 +32,15 @@ use crate::session::WorktreeInfo;
 ///
 /// Reuses the creation-time title slugger (`branch_name_from_title`) so a tied
 /// rename produces the same leaf the session would have been created with: an
-/// accent-folded, lowercased, dash-collapsed single path component. It never
-/// yields an empty string, a path separator, or `.`/`..` (it falls back to
-/// `"session"`), so the result is always a safe sibling-leaf name. Feeding it
-/// back through [`edit_worktree_workdir`]'s internal sanitizer is idempotent.
+/// accent-folded, lowercased, dash-collapsed single path component. The title
+/// slugger preserves '/' as a git namespace separator, so the result is run
+/// through `sanitize_branch_name` to fold slashes to dashes, exactly as
+/// `resolve_template` does when deriving a leaf from a branch at creation. It
+/// never yields an empty string, a path separator, or `.`/`..` (it falls back
+/// to `"session"`), so the result is always a safe sibling-leaf name. Feeding
+/// it back through [`edit_worktree_workdir`]'s internal sanitizer is idempotent.
 pub fn worktree_leaf_from_title(title: &str) -> String {
-    crate::session::builder::branch_name_from_title(title)
+    sanitize_branch_name(&crate::session::builder::branch_name_from_title(title))
 }
 
 /// Whether a sandbox session's container is still running and therefore
@@ -260,6 +263,11 @@ mod tests {
             worktree_leaf_from_title("Fix: the/thing (v2)"),
             "fix-the-thing-v2"
         );
+        // A slash-bearing title yields a slashed branch but the folder leaf
+        // must stay a single, flat path component.
+        let leaf = worktree_leaf_from_title("jacob/feature-1");
+        assert_eq!(leaf, "jacob-feature-1");
+        assert!(!leaf.contains('/'));
     }
 
     #[test]
