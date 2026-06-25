@@ -4,6 +4,7 @@
 pub mod acp;
 pub mod add;
 pub mod agents;
+pub mod context;
 pub mod definition;
 pub mod extract_session_id;
 pub mod graft;
