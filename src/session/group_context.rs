@@ -134,6 +134,18 @@ pub fn read_context(profile: &str, group_path: &str) -> Result<String> {
     Ok(fs::read_to_string(&paths.context).unwrap_or_default())
 }
 
+/// Overwrite `context.md` wholesale under the same advisory flock `append_entry`
+/// uses, so a TUI edit never races a concurrent append. The write is atomic: we
+/// stage a temp file in the group dir and rename it into place.
+pub fn write_context(profile: &str, group_path: &str, contents: &str) -> Result<()> {
+    let paths = ensure_files(profile, group_path)?;
+    let _guard = acquire_lock(&paths.lock)?;
+    let tmp = paths.context.with_extension("md.tmp");
+    fs::write(&tmp, contents)?;
+    fs::rename(&tmp, &paths.context)?;
+    Ok(())
+}
+
 pub fn read_summary(profile: &str, group_path: &str) -> Result<String> {
     let paths = paths_for(profile, group_path)?;
     Ok(fs::read_to_string(&paths.summary).unwrap_or_default())
@@ -609,6 +621,16 @@ mod tests {
         append_entry(&p, "g1", &a, "second").unwrap();
         let body = read_context(&p, "g1").unwrap();
         assert!(body.find("first").unwrap() < body.find("second").unwrap());
+    }
+
+    #[test]
+    #[serial]
+    fn write_context_round_trips_and_overwrites() {
+        let (_t, p) = with_temp_profile();
+        write_context(&p, "g1", "first body\n").unwrap();
+        assert_eq!(read_context(&p, "g1").unwrap(), "first body\n");
+        write_context(&p, "g1", "replaced\n").unwrap();
+        assert_eq!(read_context(&p, "g1").unwrap(), "replaced\n");
     }
 
     #[test]

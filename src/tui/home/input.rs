@@ -4759,6 +4759,10 @@ impl HomeView {
             dialog.handle_paste(text);
             return;
         }
+        if let Some(ref mut dialog) = self.group_context_viewer {
+            dialog.handle_paste(text);
+            return;
+        }
         if let Some(ref mut settings) = self.settings_view {
             settings.handle_paste(text);
             return;
