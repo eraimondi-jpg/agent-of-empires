@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use tracing::{debug, warn};
 
@@ -75,17 +76,26 @@ pub enum Order {
     Desc,
 }
 
-/// Build the `AND event_json NOT LIKE '{"Name":%'` SQL fragment for every
-/// externally-tagged JSON discriminant in `prefixes`, newline-joined for
-/// readable queries. Used both to pin events against retention eviction and
-/// to exclude them from activity scans; the caller supplies the set so this
-/// module stays payload-agnostic.
-fn not_like_clauses(prefixes: &[&str]) -> String {
-    prefixes
+/// Build an `AND event_json NOT LIKE ?` SQL fragment (one per discriminant in
+/// `prefixes`) plus the matching bound LIKE patterns, newline-joined for
+/// readable queries. Used both to pin events against retention eviction and to
+/// exclude them from activity scans; the caller supplies the set, so this
+/// module stays payload-agnostic. The discriminant is bound as a parameter
+/// rather than interpolated into the SQL text, so a future consumer's prefix
+/// containing a quote can't break or inject into the predicate. The clause
+/// uses anonymous `?` placeholders, so callers must build their full parameter
+/// list positionally (topic / cutoff first, then these patterns in order).
+fn not_like_clauses(prefixes: &[&str]) -> (String, Vec<String>) {
+    let fragment = prefixes
         .iter()
-        .map(|name| format!("AND event_json NOT LIKE '{{\"{name}\":%'"))
+        .map(|_| "AND event_json NOT LIKE ?")
         .collect::<Vec<_>>()
-        .join("\n               ")
+        .join("\n               ");
+    let patterns = prefixes
+        .iter()
+        .map(|name| format!("{{\"{name}\":%"))
+        .collect();
+    (fragment, patterns)
 }
 
 /// Open or create the database at `db_path` and ensure `schema`'s tables
@@ -179,6 +189,7 @@ pub fn prune_retention(
     // delete first would shift the OFFSET row out from under the
     // attachments delete and leave orphaned blobs.
     let events = schema.events_table();
+    let attachments = schema.attachments_table();
     let cutoff: Option<i64> = conn
         .query_row(
             &format!(
@@ -195,14 +206,35 @@ pub fn prune_retention(
     let Some(cutoff) = cutoff else {
         return;
     };
-    let prune_sql = format!(
-        "DELETE FROM {events}
-         WHERE session_id = ?1
-           AND seq <= ?2
-           {clauses}",
-        clauses = not_like_clauses(pinned_prefixes)
+    let (clauses, patterns) = not_like_clauses(pinned_prefixes);
+    // Drop attachment blobs owned by the events this prune deletes, using the
+    // same predicate (and ordered before the events delete so the subquery
+    // still sees those rows). Tying it to the event predicate keeps a pinned
+    // event's blobs instead of assuming pinned events never carry
+    // attachments, so a future consumer can't strand a surviving event's blob.
+    let attachment_prune_sql = format!(
+        "DELETE FROM {attachments}
+         WHERE session_id = ?
+           AND seq IN (
+               SELECT seq FROM {events}
+               WHERE session_id = ?
+                 AND seq <= ?
+                 {clauses}
+           )"
     );
-    match conn.execute(&prune_sql, params![topic, cutoff]) {
+    let mut attachment_params: Vec<Value> = vec![
+        Value::Text(topic.to_owned()),
+        Value::Text(topic.to_owned()),
+        Value::Integer(cutoff),
+    ];
+    attachment_params.extend(patterns.iter().cloned().map(Value::Text));
+    if let Err(e) = conn.execute(&attachment_prune_sql, params_from_iter(attachment_params)) {
+        warn!(target: "events", "prune attachments {topic}: {e}");
+    }
+    let prune_sql = format!("DELETE FROM {events} WHERE session_id = ? AND seq <= ? {clauses}");
+    let mut prune_params: Vec<Value> = vec![Value::Text(topic.to_owned()), Value::Integer(cutoff)];
+    prune_params.extend(patterns.into_iter().map(Value::Text));
+    match conn.execute(&prune_sql, params_from_iter(prune_params)) {
         Ok(0) => {}
         Ok(pruned) => {
             debug!(
@@ -216,19 +248,6 @@ pub fn prune_retention(
         Err(e) => {
             warn!(target: "events", "prune {topic}: {e}");
         }
-    }
-    // Drop attachment blobs whose owning event has (or is about to be)
-    // pruned. A flat `seq <= cutoff` delete cannot strand a blob whose
-    // event survived, because attachments only ever hang off prunable
-    // events, never the pinned variants.
-    if let Err(e) = conn.execute(
-        &format!(
-            "DELETE FROM {} WHERE session_id = ?1 AND seq <= ?2",
-            schema.attachments_table()
-        ),
-        params![topic, cutoff],
-    ) {
-        warn!(target: "events", "prune attachments {topic}: {e}");
     }
 }
 
@@ -384,13 +403,13 @@ pub fn last_event_at_for_topics(
     let placeholders = std::iter::repeat_n("?", topics.len())
         .collect::<Vec<_>>()
         .join(",");
+    let (clauses, patterns) = not_like_clauses(excluded_prefixes);
     let sql = format!(
         "SELECT session_id, MAX(created_at) FROM {events}
          WHERE session_id IN ({placeholders})
            {clauses}
          GROUP BY session_id",
         events = schema.events_table(),
-        clauses = not_like_clauses(excluded_prefixes)
     );
     let mut stmt = match conn.prepare(&sql) {
         Ok(s) => s,
@@ -399,7 +418,10 @@ pub fn last_event_at_for_topics(
             return out;
         }
     };
-    let rows = stmt.query_map(params_from_iter(topics.iter()), |row| {
+    // Positional params: the IN(...) topics first, then the NOT LIKE patterns.
+    let mut bind: Vec<Value> = topics.iter().map(|t| Value::Text(t.clone())).collect();
+    bind.extend(patterns.into_iter().map(Value::Text));
+    let rows = stmt.query_map(params_from_iter(bind), |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
     });
     match rows {
@@ -639,6 +661,54 @@ mod tests {
             .map(|(s, _)| s)
             .collect();
         assert_eq!(kept, vec![1, 4, 5]);
+    }
+
+    /// A pinned event's attachment must survive a prune (the prune ties the
+    /// attachment delete to the same predicate as the event delete, rather
+    /// than assuming pinned events never carry blobs). A pruned event's
+    /// attachment must be dropped.
+    #[test]
+    fn retention_keeps_pinned_event_attachments() {
+        let schema = Schema::new("demo").unwrap();
+        let conn = mem(&schema);
+        insert_event(&conn, &schema, "t", 1, "{\"Pinned\":{}}", 1).unwrap();
+        for seq in 2..=5u64 {
+            insert_event(&conn, &schema, "t", seq, "{\"Chunk\":{}}", seq as i64).unwrap();
+        }
+        // Blob on the pinned event (seq 1) and on a soon-pruned event (seq 2).
+        insert_attachment(
+            &conn,
+            &schema,
+            "t",
+            1,
+            "pinned-att",
+            "image",
+            "image/png",
+            None,
+            b"keep",
+            0,
+        );
+        insert_attachment(
+            &conn,
+            &schema,
+            "t",
+            2,
+            "pruned-att",
+            "image",
+            "image/png",
+            None,
+            b"drop",
+            0,
+        );
+        prune_retention(&conn, &schema, "t", 2, &["Pinned"]);
+        assert!(
+            load_attachment(&conn, &schema, "t", "pinned-att").is_some(),
+            "blob owned by a pinned (surviving) event must be kept"
+        );
+        assert!(
+            load_attachment(&conn, &schema, "t", "pruned-att").is_none(),
+            "blob owned by a pruned event must be dropped"
+        );
     }
 
     #[test]
