@@ -32,6 +32,7 @@ use crate::tui::dialogs::PaletteGroup;
 pub enum ActionId {
     Quit,
     ShowGroupContext,
+    CurateGroup,
     Help,
     ToolPicker,
     SearchStart,
@@ -892,6 +893,22 @@ pub static BINDINGS: &[Binding] = &[
             serve_only: false,
         }),
     },
+    Binding {
+        id: ActionId::CurateGroup,
+        non_strict: &[k('a')],
+        strict: &[k('A')],
+        context: Context::Always,
+        help: Some(HelpMeta {
+            section: HelpSection::Actions,
+            desc: "Curate group context",
+        }),
+        palette: Some(PaletteMeta {
+            title: "Curate group context",
+            keywords: &["curate", "summarize", "clean", "context"],
+            group: PaletteGroup::Actions,
+            serve_only: false,
+        }),
+    },
 ];
 
 /// Stable palette/test id for an action (matches the legacy `builtin_commands`
@@ -908,6 +925,7 @@ pub fn palette_id(id: ActionId) -> &'static str {
         ActionId::Delete => "delete",
         ActionId::Rename => "rename",
         ActionId::ShowGroupContext => "show-group-context",
+        ActionId::CurateGroup => "curate-group",
         ActionId::SetWorktreeName => "set-worktree-name",
         ActionId::Diff => "diff",
         ActionId::Serve => "serve",

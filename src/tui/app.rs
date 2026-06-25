@@ -659,6 +659,7 @@ impl App {
         let mut last_heartbeat = std::time::Instant::now();
         let mut last_presence_refresh = std::time::Instant::now();
         let mut last_session_idle_reap = std::time::Instant::now();
+        let mut last_curator_check = std::time::Instant::now();
         // Throttle for how often the periodic block re-reads settings;
         // without this, the inner guards would re-fire on every loop
         // iteration once any time has passed, hitting the config file at
@@ -679,6 +680,10 @@ impl App {
         // daemon's cadence; both reapers claim under the storage lock so they
         // never double-stop a session when run side by side.
         const SESSION_IDLE_REAP_INTERVAL: Duration = Duration::from_secs(60);
+        // How often the TUI evaluates groups for change-gated auto-curation.
+        // The per-group `curator.interval_minutes` is the real cadence; this
+        // bounds how often the cheap due-check (metadata + state reads) runs.
+        const CURATOR_CHECK_INTERVAL: Duration = Duration::from_secs(60);
         // A presence file counts as live while its mtime is within this window.
         // Larger than HEARTBEAT_INTERVAL so a couple of missed beats (busy loop,
         // brief stall) don't drop an instance; matches the push consumer.
@@ -1398,6 +1403,11 @@ impl App {
                     refresh_needed = true;
                     needs_full_refresh = true;
                 }
+            }
+
+            if last_curator_check.elapsed() >= CURATOR_CHECK_INTERVAL {
+                last_curator_check = std::time::Instant::now();
+                self.maybe_auto_curate();
             }
 
             if self.home.apply_session_id_updates() {
@@ -2551,6 +2561,47 @@ impl App {
             }
         }
         reaped
+    }
+
+    /// Spawn change-gated auto-curations for groups that are due, gated per
+    /// profile on `curator.auto`. Detached `tokio::spawn` so the UI thread
+    /// never blocks on the LLM call; the engine's per-group inflight guard
+    /// stops overlapping ticks from double-running a group. Cheap when nothing
+    /// is due: `due_groups` reads only metadata and small state files.
+    fn maybe_auto_curate(&mut self) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let now = chrono::Utc::now();
+        let profiles: Vec<String> = self
+            .home
+            .instances()
+            .iter()
+            .filter(|inst| !inst.group_path.trim().is_empty())
+            .map(|inst| inst.effective_profile())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        for profile in profiles {
+            let curator = crate::session::profile_config::resolve_config_or_warn(&profile).curator;
+            if !curator.auto {
+                continue;
+            }
+            let interval = std::time::Duration::from_secs(curator.interval_minutes.max(1) * 60);
+            let due =
+                crate::session::curator::due_groups(&profile, self.home.instances(), interval, now);
+            for group in due {
+                let profile = profile.clone();
+                let agent = curator.effective_agent().to_string();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        crate::session::curator::curate(&profile, &group, &agent, false).await
+                    {
+                        tracing::warn!(target: "curator", group = %group, "auto-curate failed: {e}");
+                    }
+                });
+            }
+        }
     }
 
     fn execute_action(

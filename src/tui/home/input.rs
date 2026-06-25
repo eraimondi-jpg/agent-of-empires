@@ -2541,6 +2541,7 @@ impl HomeView {
             ActionId::Delete => self.open_delete_for_selected(),
             ActionId::Rename => self.open_rename_for_selected(),
             ActionId::ShowGroupContext => self.open_group_context_viewer(),
+            ActionId::CurateGroup => self.curate_selected_group(),
             ActionId::SetWorktreeName => self.open_worktree_name_for_selected(),
             ActionId::Diff => self.open_diff_for_selected(),
             ActionId::Serve => self.open_serve(),
@@ -4100,6 +4101,31 @@ impl HomeView {
                 &profile, &group,
             ));
         }
+    }
+
+    /// Curate the selected group's context on demand (manual key press). Forces
+    /// a curate regardless of the change-gate and runs detached so the UI never
+    /// blocks on the LLM call. No-op when the cursor is not on a group row.
+    pub(super) fn curate_selected_group(&mut self) {
+        let Some(group) = self.selected_group.clone() else {
+            return;
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let profile = self
+            .selected_group_profile
+            .clone()
+            .unwrap_or_else(|| self.config_profile());
+        let agent = crate::session::profile_config::resolve_config_or_warn(&profile)
+            .curator
+            .effective_agent()
+            .to_string();
+        tokio::spawn(async move {
+            if let Err(e) = crate::session::curator::curate(&profile, &group, &agent, true).await {
+                tracing::warn!(target: "curator", group = %group, "manual curate failed: {e}");
+            }
+        });
     }
 
     pub(super) fn open_rename_for_selected(&mut self) {

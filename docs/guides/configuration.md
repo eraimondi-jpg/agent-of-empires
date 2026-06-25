@@ -269,6 +269,23 @@ context_lines = 3
 | `default_branch` | (auto-detect) | Base branch for diffs |
 | `context_lines` | `3` | Lines of context around changes |
 
+## Curator
+
+The group-context curator (L2) periodically rewrites a group's append-only `context.md` into a deduplicated, hierarchical document plus an outward-facing `summary.md`, running the configured agent once in one-shot mode. Auto-curation is change-gated: a group is only curated when its context has grown since the last run and at least `interval_minutes` have elapsed. You can also curate the selected group on demand with the `a` key (`Shift+A` in strict-hotkey mode).
+
+```toml
+[curator]
+auto = true
+interval_minutes = 60
+# agent = "claude"
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `auto` | `true` | Automatically curate group context |
+| `interval_minutes` | `60` | Minutes between automatic curations |
+| `agent` | (claude) | Agent CLI to run as the curator (default claude) |
+
 ## Updates
 
 ```toml

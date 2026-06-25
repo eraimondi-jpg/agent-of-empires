@@ -65,6 +65,9 @@ pub struct Config {
     pub acp: AcpConfig,
 
     #[serde(default)]
+    pub curator: CuratorConfig,
+
+    #[serde(default)]
     pub logging: LoggingConfig,
 
     /// Environment variables injected into the host command line for every
@@ -1617,6 +1620,55 @@ impl Default for AuthConfig {
     }
 }
 
+/// Group-context curator (L2) configuration. Drives the change-gated
+/// auto-curation that runs the configured agent over a group's `context.md`
+/// on an interval, keeping it deduplicated without manual intervention.
+#[derive(Debug, Clone, Serialize, Deserialize, SettingsSection)]
+#[setting_section(name = "curator", category = "Session")]
+pub struct CuratorConfig {
+    /// Automatically curate group context.
+    #[serde(default = "default_true")]
+    #[setting(label = "Auto-curate group context", widget = "toggle")]
+    pub auto: bool,
+
+    /// Minutes between automatic curations.
+    #[serde(default = "default_curator_interval_minutes")]
+    #[setting(
+        label = "Curation interval (minutes)",
+        widget = "number",
+        min = 1,
+        validate = "range:1"
+    )]
+    pub interval_minutes: u64,
+
+    /// Agent CLI to run as the curator (default claude).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[setting(label = "Curator agent", widget = "optional_text")]
+    pub agent: Option<String>,
+}
+
+impl Default for CuratorConfig {
+    fn default() -> Self {
+        Self {
+            auto: true,
+            interval_minutes: default_curator_interval_minutes(),
+            agent: None,
+        }
+    }
+}
+
+impl CuratorConfig {
+    /// Effective curator agent name: the configured `agent` if set, else the
+    /// `claude` default.
+    pub fn effective_agent(&self) -> &str {
+        self.agent.as_deref().unwrap_or("claude")
+    }
+}
+
+fn default_curator_interval_minutes() -> u64 {
+    60
+}
+
 /// Serde default for `Config.default_profile`. Empty means "not explicitly
 /// chosen"; the active profile is then resolved at runtime by
 /// `resolve_default_profile`, which picks the first existing profile or
@@ -2465,6 +2517,17 @@ pub fn get_telemetry_settings() -> TelemetryConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn curator_effective_agent_defaults_to_claude() {
+        let cfg = CuratorConfig::default();
+        assert_eq!(cfg.effective_agent(), "claude");
+        let custom = CuratorConfig {
+            agent: Some("codex".to_string()),
+            ..CuratorConfig::default()
+        };
+        assert_eq!(custom.effective_agent(), "codex");
+    }
 
     #[test]
     fn test_effective_profile_returns_input_when_non_empty() {

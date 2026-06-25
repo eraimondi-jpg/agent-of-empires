@@ -2980,6 +2980,8 @@ async fn status_poll_loop(state: Arc<AppState>) {
     #[cfg(feature = "serve")]
     let mut last_session_idle_reap: Option<std::time::Instant> = None;
     #[cfg(feature = "serve")]
+    let mut last_curator_check: Option<std::time::Instant> = None;
+    #[cfg(feature = "serve")]
     let mut last_rate_limit_reap: Option<std::time::Instant> = None;
     // Per-session reconciler respawn budget + crash-loop park set (#1945).
     // Owned by the loop so they persist across ticks, swept against live
@@ -3141,6 +3143,9 @@ async fn status_poll_loop(state: Arc<AppState>) {
 
             #[cfg(feature = "serve")]
             reap_idle_sessions(&state, &mut last_session_idle_reap).await;
+
+            #[cfg(feature = "serve")]
+            auto_curate_due_groups(&state, &mut last_curator_check).await;
         }
     }
 }
@@ -3150,6 +3155,69 @@ async fn status_poll_loop(state: Arc<AppState>) {
 /// not drive a storage + tmux sweep on every iteration.
 #[cfg(feature = "serve")]
 const SESSION_IDLE_REAP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How often the serve daemon evaluates groups for change-gated
+/// auto-curation. The per-group `curator.interval_minutes` is the real
+/// cadence; this just bounds how often the cheap due-check runs so a 2s
+/// status tick does not re-scan state files every iteration.
+#[cfg(feature = "serve")]
+const CURATOR_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Spawn change-gated auto-curations for groups that are due, gated per profile
+/// on `curator.auto`. Runs at most once per [`CURATOR_CHECK_INTERVAL`]. Config
+/// resolution and the `due_groups` state reads happen on `spawn_blocking` (disk
+/// I/O), each curate runs on a detached task so the poll loop never blocks; the
+/// engine's per-group inflight guard stops overlapping ticks from double-running.
+#[cfg(feature = "serve")]
+async fn auto_curate_due_groups(
+    state: &Arc<AppState>,
+    last_check: &mut Option<std::time::Instant>,
+) {
+    if last_check.is_some_and(|t| t.elapsed() < CURATOR_CHECK_INTERVAL) {
+        return;
+    }
+    *last_check = Some(std::time::Instant::now());
+
+    let now = chrono::Utc::now();
+    let instances = { state.instances.read().await.clone() };
+    if instances.iter().all(|i| i.group_path.trim().is_empty()) {
+        return;
+    }
+
+    let profiles: Vec<String> = instances
+        .iter()
+        .filter(|inst| !inst.group_path.trim().is_empty())
+        .map(|inst| inst.effective_profile())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let plans = tokio::task::spawn_blocking(move || {
+        let mut plans: Vec<(String, String, String)> = Vec::new();
+        for profile in profiles {
+            let curator = crate::session::profile_config::resolve_config_or_warn(&profile).curator;
+            if !curator.auto {
+                continue;
+            }
+            let interval = std::time::Duration::from_secs(curator.interval_minutes.max(1) * 60);
+            let agent = curator.effective_agent().to_string();
+            for group in crate::session::curator::due_groups(&profile, &instances, interval, now) {
+                plans.push((profile.clone(), group, agent.clone()));
+            }
+        }
+        plans
+    })
+    .await
+    .unwrap_or_default();
+
+    for (profile, group, agent) in plans {
+        tokio::spawn(async move {
+            if let Err(e) = crate::session::curator::curate(&profile, &group, &agent, false).await {
+                tracing::warn!(target: "curator", group = %group, "auto-curate failed: {e}");
+            }
+        });
+    }
+}
 
 /// Cap on concurrent `perform_stop` calls during one reap pass. `Instance::stop`
 /// can block ~10s on `docker stop`; without a bound, a fleet of sessions all

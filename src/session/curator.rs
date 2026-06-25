@@ -16,6 +16,7 @@
 use crate::agents;
 use crate::session::group_context;
 
+use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -101,6 +102,41 @@ fn resolve_curator_agent(tool: &str) -> Option<&'static agents::AgentDef> {
     let agent = agents::get_agent(tool)?;
     agent.oneshot_flag?;
     Some(agent)
+}
+
+/// Distinct non-empty groups among `instances` that are due for an automatic
+/// curation: `context.md` has grown since the last curation AND either there is
+/// no prior state or at least `interval` has elapsed since `last_run_at`. State
+/// read errors degrade to "not due" so a transient failure never spams the
+/// agent. Cheap: only metadata and small state-file reads, no LLM work.
+pub fn due_groups(
+    profile: &str,
+    instances: &[crate::session::Instance],
+    interval: Duration,
+    now: DateTime<Utc>,
+) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut due = Vec::new();
+    let interval =
+        chrono::Duration::from_std(interval).unwrap_or_else(|_| chrono::Duration::zero());
+    for inst in instances {
+        let group = inst.group_path.trim();
+        if group.is_empty() || !seen.insert(group.to_string()) {
+            continue;
+        }
+        if !group_context::context_grew_since_last_curation(profile, group).unwrap_or(false) {
+            continue;
+        }
+        let elapsed = match group_context::read_curator_state(profile, group) {
+            Ok(Some(state)) => now - state.last_run_at >= interval,
+            Ok(None) => true,
+            Err(_) => false,
+        };
+        if elapsed {
+            due.push(group.to_string());
+        }
+    }
+    due
 }
 
 /// Build the roster of members for a group from loaded instances: every
@@ -476,6 +512,85 @@ mod tests {
         let agent = agents::get_agent("claude").unwrap();
         let argv = build_oneshot_argv(agent, "do the thing").expect("claude has one-shot");
         assert_eq!(argv, vec!["claude", "-p", "do the thing"]);
+    }
+
+    fn instance_in_group(group: &str) -> crate::session::Instance {
+        let mut inst = crate::session::Instance::new("member", "/tmp/test");
+        inst.group_path = group.to_string();
+        inst
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn due_groups_reports_grown_and_interval_elapsed() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path());
+        std::env::set_var("HOME", tmp.path());
+        let profile = "default";
+        let now = Utc::now();
+        let interval = Duration::from_secs(3600);
+
+        // grown is a never-curated group whose context exists: due.
+        group_context::write_context(profile, "grown", "seed\n").unwrap();
+        // soon was just curated and has not grown: not due.
+        group_context::write_context(profile, "soon", "seed\n").unwrap();
+        let (_c, len) = group_context::snapshot_for_curation(profile, "soon").unwrap();
+        group_context::commit_curation(profile, "soon", "clean", "digest", len).unwrap();
+
+        let instances = vec![
+            instance_in_group("grown"),
+            instance_in_group("soon"),
+            // empty group_path is ignored.
+            crate::session::Instance::new("loose", "/tmp/test"),
+        ];
+
+        let due = due_groups(profile, &instances, interval, now);
+        assert_eq!(
+            due,
+            vec!["grown".to_string()],
+            "only the grown group is due"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn due_groups_excludes_curated_until_interval_elapses() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path());
+        std::env::set_var("HOME", tmp.path());
+        let profile = "default";
+        let interval = Duration::from_secs(3600);
+
+        group_context::write_context(profile, "g1", "seed\n").unwrap();
+        let (_c, len) = group_context::snapshot_for_curation(profile, "g1").unwrap();
+        group_context::commit_curation(profile, "g1", "clean", "digest", len).unwrap();
+        // An append makes it grow again; only the interval now gates it.
+        let author = group_context::Author {
+            title: "x".into(),
+            tool: "claude".into(),
+            session_id: "abcd1234".into(),
+        };
+        group_context::append_entry(profile, "g1", &author, "new note").unwrap();
+
+        let instances = vec![instance_in_group("g1")];
+
+        // Just after curation: grown but interval not elapsed, so excluded.
+        let just_after = group_context::read_curator_state(profile, "g1")
+            .unwrap()
+            .unwrap()
+            .last_run_at;
+        assert!(
+            due_groups(profile, &instances, interval, just_after).is_empty(),
+            "grown but too soon is excluded"
+        );
+
+        // Past the interval: now due.
+        let later = just_after + chrono::Duration::seconds(3601);
+        assert_eq!(
+            due_groups(profile, &instances, interval, later),
+            vec!["g1".to_string()],
+            "grown and interval elapsed is due"
+        );
     }
 
     #[tokio::test]
