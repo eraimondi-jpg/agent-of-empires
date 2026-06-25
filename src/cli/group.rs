@@ -216,6 +216,18 @@ async fn move_session(profile: &str, args: GroupMoveArgs) -> Result<()> {
         Ok(old)
     })?;
 
+    // Reconcile the moved session's group-context wiring (cwd is unchanged, so a
+    // re-attach repoints it to the new group; detach when moved out of all groups).
+    if let Ok((instances, _)) = storage.load_with_groups() {
+        if let Ok(inst) = super::resolve_session(&identifier, &instances) {
+            if inst.group_path.is_empty() {
+                let _ = crate::session::group_context::detach_for_instance(inst);
+            } else {
+                let _ = crate::session::group_context::attach_for_instance(profile, inst);
+            }
+        }
+    }
+
     if old_group.is_empty() {
         println!("✓ Moved session to group: {}", group);
     } else {

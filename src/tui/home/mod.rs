@@ -4666,6 +4666,10 @@ impl HomeView {
     }
 
     pub fn save(&mut self) -> anyhow::Result<()> {
+        // Keep every grouped session wired to its shared context (Approach 1).
+        // Idempotent and write-if-changed, so it is cheap on every save.
+        crate::session::group_context::reconcile_all(&self.instances);
+
         let mut all_peer_deleted: Vec<String> = Vec::new();
 
         for (profile_name, storage) in &self.storages {
@@ -4894,6 +4898,8 @@ impl HomeView {
     /// not end up persisted.
     pub(super) fn remove_instance(&mut self, id: &str) {
         if let Some(inst) = self.instance_map.get(id) {
+            // Tear down the group-context wiring while we still have cwd + tool.
+            let _ = crate::session::group_context::detach_for_instance(inst);
             let profile = inst.source_profile.clone();
             self.pending_deletions
                 .entry(profile.clone())

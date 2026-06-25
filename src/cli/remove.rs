@@ -54,6 +54,9 @@ pub async fn run(profile: &str, args: RemoveArgs) -> Result<()> {
     let removed_id = inst.id.clone();
     let removed_title = inst.title.clone();
 
+    // Remove the group-context wiring before the session is deleted.
+    let _ = crate::session::group_context::detach_for_instance(&inst);
+
     let config = crate::session::repo_config::resolve_config_with_repo_or_warn(
         profile,
         std::path::Path::new(&inst.project_path),

@@ -907,7 +907,10 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
         Ok(true)
     });
     match persist_result {
-        Ok(true) => {}
+        Ok(true) => {
+            // Wire the new session to its group's shared context (Approach 1).
+            let _ = crate::session::group_context::attach_for_instance(profile, &instance);
+        }
         Ok(false) => {
             println!(
                 "Session already exists with same title and path: {}",
