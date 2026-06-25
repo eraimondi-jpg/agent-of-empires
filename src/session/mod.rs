@@ -7,6 +7,7 @@ pub mod config;
 pub(crate) mod container_config;
 pub mod deletion;
 pub(crate) mod environment;
+pub mod group_context;
 mod groups;
 pub mod idle_reap;
 mod instance;
