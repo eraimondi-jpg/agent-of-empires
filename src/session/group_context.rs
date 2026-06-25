@@ -11,6 +11,7 @@ use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 
 use super::get_profile_dir;
+use super::Instance;
 
 pub const SUMMARY_PLACEHOLDER: &str =
     "<!-- maintained by the group curator (L2); empty until then -->";
@@ -175,6 +176,223 @@ pub fn list_summaries(profile: &str) -> Result<Vec<GroupSummary>> {
         }
     }
     Ok(out)
+}
+
+#[cfg(unix)]
+fn make_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(not(unix))]
+fn make_symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlinks not supported on this platform",
+    ))
+}
+
+/// Append names to `.git/info/exclude` (not the tracked `.gitignore`) so the
+/// surfaced files never show up in the user's status. No-op outside a git dir.
+fn add_git_excludes(cwd: &Path, names: &[&str]) {
+    let exclude = cwd.join(".git").join("info").join("exclude");
+    if !exclude.parent().map(|p| p.is_dir()).unwrap_or(false) {
+        return;
+    }
+    let mut content = std::fs::read_to_string(&exclude).unwrap_or_default();
+    let mut changed = false;
+    for n in names {
+        if !content.lines().any(|l| l.trim() == *n) {
+            if !content.is_empty() && !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push_str(n);
+            content.push('\n');
+            changed = true;
+        }
+    }
+    if changed {
+        let _ = std::fs::write(&exclude, content);
+    }
+}
+
+/// Surface the group's context into a session's working dir and make the agent
+/// persistently aware of it (Approach 1). Best-effort: a failure here logs a
+/// warning and never blocks a session launch.
+pub fn attach(
+    profile: &str,
+    group_path: &str,
+    project_path: &str,
+    tool: &str,
+    session_id: &str,
+) -> Result<()> {
+    if group_path.is_empty() {
+        return Ok(());
+    }
+    let paths = ensure_files(profile, group_path)?;
+    let cwd = Path::new(project_path);
+    if !cwd.is_dir() {
+        return Ok(());
+    }
+
+    // 1. Symlink context.md into cwd; never clobber a real file of that name.
+    let link = cwd.join(wiring::CONTEXT_LINK_NAME);
+    match std::fs::symlink_metadata(&link) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let _ = std::fs::remove_file(&link);
+            if let Err(e) = make_symlink(&paths.context, &link) {
+                tracing::warn!("group-context: relink failed: {e}");
+            }
+        }
+        Ok(_) => tracing::warn!(
+            "group-context: {} exists and is not our symlink; leaving it",
+            link.display()
+        ),
+        Err(_) => {
+            if let Err(e) = make_symlink(&paths.context, &link) {
+                tracing::warn!("group-context: symlink failed: {e}");
+            }
+        }
+    }
+
+    // 2. Marker (carries group + session id for `aoe context add`). Write only
+    // when it changed, so repeated reconcile calls are cheap and quiet.
+    let marker_path = cwd.join(wiring::MARKER_NAME);
+    let marker = wiring::marker_contents(profile, group_path, session_id);
+    if std::fs::read_to_string(&marker_path).ok().as_deref() != Some(marker.as_str()) {
+        if let Err(e) = std::fs::write(&marker_path, marker) {
+            tracing::warn!("group-context: marker write failed: {e}");
+        }
+    }
+
+    // 3. Keep the surfaced files out of git status.
+    add_git_excludes(cwd, &[wiring::CONTEXT_LINK_NAME, wiring::MARKER_NAME]);
+
+    // 4. Managed block in the tool's always-loaded instruction file.
+    if let Some(fname) = wiring::instruction_filename_for_tool(tool) {
+        let ifile = cwd.join(fname);
+        let existing = std::fs::read_to_string(&ifile).unwrap_or_default();
+        let block = wiring::render_managed_block(group_path, wiring::CONTEXT_LINK_NAME);
+        let updated = wiring::upsert_block(&existing, &block);
+        if updated != existing {
+            if let Err(e) = std::fs::write(&ifile, updated) {
+                tracing::warn!("group-context: instruction-file write failed: {e}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Remove the wiring `attach` added. Best-effort.
+pub fn detach(project_path: &str, tool: &str) -> Result<()> {
+    let cwd = Path::new(project_path);
+    if !cwd.is_dir() {
+        return Ok(());
+    }
+    let link = cwd.join(wiring::CONTEXT_LINK_NAME);
+    if let Ok(meta) = std::fs::symlink_metadata(&link) {
+        if meta.file_type().is_symlink() {
+            let _ = std::fs::remove_file(&link);
+        }
+    }
+    let _ = std::fs::remove_file(cwd.join(wiring::MARKER_NAME));
+    if let Some(fname) = wiring::instruction_filename_for_tool(tool) {
+        let ifile = cwd.join(fname);
+        if let Ok(existing) = std::fs::read_to_string(&ifile) {
+            let cleaned = wiring::remove_block(&existing);
+            if cleaned != existing {
+                let _ = std::fs::write(&ifile, cleaned);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn attach_for_instance(profile: &str, inst: &Instance) -> Result<()> {
+    attach(
+        profile,
+        &inst.group_path,
+        &inst.project_path,
+        &inst.tool,
+        &inst.id,
+    )
+}
+
+pub fn detach_for_instance(inst: &Instance) -> Result<()> {
+    detach(&inst.project_path, &inst.tool)
+}
+
+/// Idempotently (re)attach every grouped instance to its group context. Cheap
+/// to call repeatedly thanks to the write-if-changed guards in `attach`; used as
+/// the TUI's post-mutation reconcile so create and move are both covered without
+/// a per-operation hook.
+pub fn reconcile_all(instances: &[Instance]) {
+    for inst in instances {
+        if inst.group_path.is_empty() {
+            continue;
+        }
+        let _ = attach(
+            &inst.source_profile,
+            &inst.group_path,
+            &inst.project_path,
+            &inst.tool,
+            &inst.id,
+        );
+    }
+}
+
+#[cfg(test)]
+mod attach_tests {
+    use super::wiring;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn attach_creates_wiring_and_detach_removes_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path());
+        std::env::set_var("HOME", tmp.path());
+        let work = tmp.path().join("repo");
+        std::fs::create_dir_all(work.join(".git").join("info")).unwrap();
+        let work_s = work.to_str().unwrap();
+
+        super::attach("default", "g1", work_s, "claude", "sess1234").unwrap();
+        assert!(
+            std::fs::symlink_metadata(work.join(wiring::CONTEXT_LINK_NAME))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(work.join(wiring::MARKER_NAME).exists());
+        let claude = std::fs::read_to_string(work.join("CLAUDE.md")).unwrap();
+        assert!(claude.contains(wiring::BLOCK_START));
+        let exclude = std::fs::read_to_string(work.join(".git/info/exclude")).unwrap();
+        assert!(exclude.contains(wiring::CONTEXT_LINK_NAME));
+
+        super::detach(work_s, "claude").unwrap();
+        assert!(!work.join(wiring::MARKER_NAME).exists());
+        let claude2 = std::fs::read_to_string(work.join("CLAUDE.md")).unwrap();
+        assert!(!claude2.contains(wiring::BLOCK_START));
+    }
+
+    #[test]
+    #[serial]
+    fn attach_skips_existing_real_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path());
+        std::env::set_var("HOME", tmp.path());
+        let work = tmp.path().join("repo2");
+        std::fs::create_dir_all(&work).unwrap();
+        let real = work.join(wiring::CONTEXT_LINK_NAME);
+        std::fs::write(&real, "i am a real file").unwrap();
+
+        super::attach("default", "g1", work.to_str().unwrap(), "claude", "s1").unwrap();
+        // The real file is preserved, not replaced by a symlink.
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "i am a real file");
+        assert!(!std::fs::symlink_metadata(&real)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
 }
 
 /// Approach-1 awareness wiring: pure helpers for the managed instruction block,
