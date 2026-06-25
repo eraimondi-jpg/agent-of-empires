@@ -35,7 +35,7 @@ use super::deletion_poller::DeletionPoller;
 #[cfg(feature = "serve")]
 use super::dialogs::ServeView;
 use super::dialogs::{
-    ChangelogDialog, CommandPaletteDialog, ConfirmDialog, ContextMenuDialog,
+    ChangelogDialog, CommandPaletteDialog, ConfirmDialog, ContextMenuDialog, GroupContextDialog,
     GroupDeleteOptionsDialog, GroupPickerDialog, HooksInstallDialog, InfoDialog, IntroDialog,
     NewSessionData, NewSessionDialog, NoAgentsDialog, ProfilePickerDialog,
     ProjectSessionPickerDialog, ProjectsDialog, RenameDialog, RepoTrustDialog, RestartDialog,
@@ -493,6 +493,7 @@ pub struct HomeView {
     pub(super) pending_intro_theme: Option<String>,
     pub(super) no_agents_dialog: Option<NoAgentsDialog>,
     pub(super) changelog_dialog: Option<ChangelogDialog>,
+    pub(super) group_context_viewer: Option<GroupContextDialog>,
     pub(super) info_dialog: Option<InfoDialog>,
     pub(super) snooze_duration_dialog: Option<SnoozeDurationDialog>,
     /// Session id the snooze duration picker targets. Set when the dialog
@@ -1991,6 +1992,7 @@ impl HomeView {
             pending_intro_theme: None,
             no_agents_dialog: None,
             changelog_dialog: None,
+            group_context_viewer: None,
             info_dialog: None,
             snooze_duration_dialog: None,
             pending_snooze_session: None,
@@ -3729,6 +3731,7 @@ impl HomeView {
         serve_open
             || self.info_dialog.is_some()
             || self.changelog_dialog.is_some()
+            || self.group_context_viewer.is_some()
             || self
                 .intro_dialog
                 .as_ref()
@@ -3770,6 +3773,7 @@ impl HomeView {
             || self.intro_dialog.is_some()
             || self.no_agents_dialog.is_some()
             || self.changelog_dialog.is_some()
+            || self.group_context_viewer.is_some()
             || self.info_dialog.is_some()
             || self.snooze_duration_dialog.is_some()
             || self.profile_picker_dialog.is_some()
@@ -3810,6 +3814,7 @@ impl HomeView {
             || self.intro_dialog.is_some()
             || self.no_agents_dialog.is_some()
             || self.changelog_dialog.is_some()
+            || self.group_context_viewer.is_some()
             || self.info_dialog.is_some()
             || self.snooze_duration_dialog.is_some()
             || self.profile_picker_dialog.is_some()
