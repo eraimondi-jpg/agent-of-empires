@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
+use serde::{Deserialize, Serialize};
 
 use super::get_profile_dir;
 use super::Instance;
@@ -17,12 +18,14 @@ pub const SUMMARY_PLACEHOLDER: &str =
     "<!-- maintained by the group curator (L2); empty until then -->";
 
 const LOCK_FILENAME: &str = ".context.lock";
+const STATE_FILENAME: &str = ".curator.json";
 
 pub struct GroupContextPaths {
     pub dir: PathBuf,
     pub context: PathBuf,
     pub summary: PathBuf,
     pub lock: PathBuf,
+    pub state: PathBuf,
 }
 
 pub struct Author {
@@ -60,6 +63,7 @@ pub fn paths_for(profile: &str, group_path: &str) -> Result<GroupContextPaths> {
         context: dir.join("context.md"),
         summary: dir.join("summary.md"),
         lock: dir.join(LOCK_FILENAME),
+        state: dir.join(STATE_FILENAME),
         dir,
     })
 }
@@ -161,6 +165,100 @@ pub fn write_context(profile: &str, group_path: &str, contents: &str) -> Result<
     fs::write(&tmp, contents)?;
     fs::rename(&tmp, &paths.context)?;
     Ok(())
+}
+
+/// Persisted curator bookkeeping, stored as JSON at `<group dir>/.curator.json`.
+/// `last_size` is the byte length `context.md` had right after the last
+/// curation, so the change-gate can tell whether agents have appended since.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct CuratorState {
+    pub last_run_at: chrono::DateTime<chrono::Utc>,
+    pub last_size: u64,
+}
+
+/// Read the persisted curator state, or `None` when it has never run (missing
+/// file) or the file is unreadable/unparseable. A corrupt state file degrades to
+/// "treat as never curated" rather than failing the caller.
+pub fn read_curator_state(profile: &str, group_path: &str) -> Result<Option<CuratorState>> {
+    let paths = paths_for(profile, group_path)?;
+    let Ok(raw) = fs::read_to_string(&paths.state) else {
+        return Ok(None);
+    };
+    Ok(serde_json::from_str(&raw).ok())
+}
+
+fn write_curator_state(paths: &GroupContextPaths, state: &CuratorState) -> Result<()> {
+    let tmp = paths.state.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(state)?)?;
+    fs::rename(&tmp, &paths.state)?;
+    Ok(())
+}
+
+/// Take a snapshot of `context.md` for curation: returns its current content and
+/// byte length. The flock is held only for the read and dropped before
+/// returning, because the slow LLM call happens in the caller between this and
+/// `commit_curation`; the lock must never span it.
+pub fn snapshot_for_curation(profile: &str, group_path: &str) -> Result<(String, u64)> {
+    let paths = ensure_files(profile, group_path)?;
+    let _guard = acquire_lock(&paths.lock)?;
+    let content = fs::read_to_string(&paths.context).unwrap_or_default();
+    let len = content.len() as u64;
+    Ok((content, len))
+}
+
+/// Commit a curated rewrite of `context.md` losslessly. `snapshot_len` is the
+/// byte length from the matching `snapshot_for_curation`; any bytes past it are
+/// agent appends that landed during the (unlocked) LLM call and are preserved
+/// verbatim by appending them after the cleaned text. Both files are written
+/// atomically and the curator state is refreshed, all under the flock.
+pub fn commit_curation(
+    profile: &str,
+    group_path: &str,
+    cleaned_context: &str,
+    summary: &str,
+    snapshot_len: u64,
+) -> Result<()> {
+    let paths = ensure_files(profile, group_path)?;
+    let _guard = acquire_lock(&paths.lock)?;
+
+    let current = fs::read(&paths.context).unwrap_or_default();
+    let snap = snapshot_len as usize;
+    let tail: &[u8] = if current.len() > snap {
+        &current[snap..]
+    } else {
+        &[]
+    };
+
+    let mut new_context = cleaned_context.trim_end_matches('\n').as_bytes().to_vec();
+    new_context.push(b'\n');
+    new_context.extend_from_slice(tail);
+
+    let tmp_ctx = paths.context.with_extension("md.tmp");
+    fs::write(&tmp_ctx, &new_context)?;
+    fs::rename(&tmp_ctx, &paths.context)?;
+
+    let tmp_sum = paths.summary.with_extension("md.tmp");
+    fs::write(&tmp_sum, summary)?;
+    fs::rename(&tmp_sum, &paths.summary)?;
+
+    let state = CuratorState {
+        last_run_at: chrono::Utc::now(),
+        last_size: new_context.len() as u64,
+    };
+    write_curator_state(&paths, &state)?;
+    Ok(())
+}
+
+/// Whether `context.md` changed since the last curation: true when no state
+/// exists yet, or the current byte size differs from the recorded `last_size`.
+/// Feeds the auto-trigger change-gate.
+pub fn context_grew_since_last_curation(profile: &str, group_path: &str) -> Result<bool> {
+    let Some(state) = read_curator_state(profile, group_path)? else {
+        return Ok(true);
+    };
+    let paths = paths_for(profile, group_path)?;
+    let size = fs::metadata(&paths.context).map(|m| m.len()).unwrap_or(0);
+    Ok(size != state.last_size)
 }
 
 pub fn read_summary(profile: &str, group_path: &str) -> Result<String> {
@@ -679,5 +777,74 @@ mod tests {
             .collect();
         got.sort();
         assert_eq!(got, vec!["alpha".to_string(), "beta/child".to_string()]);
+    }
+
+    #[test]
+    #[serial]
+    fn snapshot_returns_content_and_byte_length() {
+        let (_t, p) = with_temp_profile();
+        write_context(&p, "g1", "hello world\n").unwrap();
+        let (content, len) = snapshot_for_curation(&p, "g1").unwrap();
+        assert_eq!(content, "hello world\n");
+        assert_eq!(len, content.len() as u64);
+    }
+
+    #[test]
+    #[serial]
+    fn commit_without_concurrent_append_replaces_both_files() {
+        let (_t, p) = with_temp_profile();
+        write_context(&p, "g1", "raw notes\nmore raw\n").unwrap();
+        let (_content, len) = snapshot_for_curation(&p, "g1").unwrap();
+        commit_curation(&p, "g1", "clean summary line", "outward digest", len).unwrap();
+
+        assert_eq!(read_context(&p, "g1").unwrap(), "clean summary line\n");
+        assert_eq!(read_summary(&p, "g1").unwrap(), "outward digest");
+
+        let state = read_curator_state(&p, "g1").unwrap().unwrap();
+        assert_eq!(state.last_size, "clean summary line\n".len() as u64);
+    }
+
+    #[test]
+    #[serial]
+    fn commit_preserves_concurrent_append_tail() {
+        let (_t, p) = with_temp_profile();
+        write_context(&p, "g1", "original body\n").unwrap();
+        let (_content, len) = snapshot_for_curation(&p, "g1").unwrap();
+
+        // An agent append lands during the (simulated) LLM call.
+        let a = Author {
+            title: "late".into(),
+            tool: "claude".into(),
+            session_id: "deadbeef0000".into(),
+        };
+        append_entry(&p, "g1", &a, "appended after snapshot").unwrap();
+
+        commit_curation(&p, "g1", "cleaned text", "digest", len).unwrap();
+        let body = read_context(&p, "g1").unwrap();
+        let clean_at = body.find("cleaned text").expect("cleaned text present");
+        let tail_at = body
+            .find("appended after snapshot")
+            .expect("appended note preserved");
+        assert!(clean_at < tail_at, "cleaned text must precede the tail");
+    }
+
+    #[test]
+    #[serial]
+    fn grew_tracks_curation_and_subsequent_appends() {
+        let (_t, p) = with_temp_profile();
+        write_context(&p, "g1", "seed\n").unwrap();
+        assert!(context_grew_since_last_curation(&p, "g1").unwrap());
+
+        let (_content, len) = snapshot_for_curation(&p, "g1").unwrap();
+        commit_curation(&p, "g1", "curated", "digest", len).unwrap();
+        assert!(!context_grew_since_last_curation(&p, "g1").unwrap());
+
+        let a = Author {
+            title: "x".into(),
+            tool: "claude".into(),
+            session_id: "abcd1234efgh".into(),
+        };
+        append_entry(&p, "g1", &a, "new note").unwrap();
+        assert!(context_grew_since_last_curation(&p, "g1").unwrap());
     }
 }
