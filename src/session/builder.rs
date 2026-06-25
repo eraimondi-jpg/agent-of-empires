@@ -935,6 +935,23 @@ pub(crate) fn branch_name_from_title(title: &str) -> String {
     let mut last_was_dash = false;
 
     let mut push_processed = |ch: char| {
+        // Preserve '/' as git's namespace separator (so a title like
+        // `jacob/feature-1` yields a branch `jacob/feature-1`). The worktree
+        // folder leaf is sanitized separately via `sanitize_branch_name`, so
+        // the slash never reaches a path. Never emit a leading, trailing, or
+        // doubled slash; trim any pending dash before it.
+        if ch == '/' {
+            while branch.ends_with('-') {
+                branch.pop();
+            }
+            if branch.is_empty() || branch.ends_with('/') {
+                return;
+            }
+            branch.push('/');
+            last_was_dash = true;
+            return;
+        }
+
         let next = if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
             Some(ch.to_ascii_lowercase())
         } else if ch.is_whitespace() || ch.is_ascii_punctuation() {
@@ -963,7 +980,7 @@ pub(crate) fn branch_name_from_title(title: &str) -> String {
         }
     }
 
-    while branch.ends_with('-') {
+    while branch.ends_with('-') || branch.ends_with('/') {
         branch.pop();
     }
 
@@ -1092,10 +1109,25 @@ mod tests {
             branch_name_from_title("Fix: login @ mobile #42"),
             "fix-login-mobile-42"
         );
+        // '/' is the legal git namespace separator and is preserved; '.' is
+        // still folded to '-'.
         assert_eq!(
             branch_name_from_title("feat/auth.refactor"),
-            "feat-auth-refactor"
+            "feat/auth-refactor"
         );
+    }
+
+    #[test]
+    fn test_branch_name_from_title_preserves_slashes() {
+        // The motivating case: a `user/topic` title keeps its slash in the
+        // branch, while the worktree folder leaf is sanitized elsewhere.
+        assert_eq!(branch_name_from_title("jacob/feature-1"), "jacob/feature-1");
+        // No leading, trailing, or doubled slash; dashes around a slash are
+        // trimmed.
+        assert_eq!(branch_name_from_title("/leading"), "leading");
+        assert_eq!(branch_name_from_title("trailing/"), "trailing");
+        assert_eq!(branch_name_from_title("a//b"), "a/b");
+        assert_eq!(branch_name_from_title("a / b"), "a/b");
     }
 
     #[test]
