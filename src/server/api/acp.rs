@@ -1011,6 +1011,51 @@ async fn touch_and_wake_if_sunk(state: &Arc<AppState>, id: &str) -> bool {
     woke_idle_dormant
 }
 
+/// Compose the group-context section to prepend to a grouped session's first
+/// prompt, or `None` when injection does not apply. Returns `None` when: the
+/// config toggle is off, the session is ungrouped, the session already has a
+/// prior `UserPromptSent` (so this is not its first prompt), or the group
+/// context is empty. Best-effort: every miss is a quiet `None`, never an error.
+async fn group_context_launch_injection(state: &AppState, id: &str) -> Option<String> {
+    let (group_path, profile) = {
+        let instances = state.instances.read().await;
+        let inst = instances.iter().find(|i| i.id == id)?;
+        if inst.group_path.is_empty() {
+            return None;
+        }
+        (inst.group_path.clone(), inst.source_profile.clone())
+    };
+    let inject_enabled = tokio::task::spawn_blocking({
+        let profile = profile.clone();
+        move || {
+            crate::session::profile_config::resolve_config_or_warn(&profile)
+                .session
+                .inject_group_context_at_launch
+        }
+    })
+    .await
+    .unwrap_or(true);
+    if !inject_enabled {
+        return None;
+    }
+    // First prompt only: a session with an earlier UserPromptSent is past launch.
+    if state.acp_event_store.first_user_prompt(id).is_some() {
+        return None;
+    }
+    let context = match crate::session::group_context::read_context(&profile, &group_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                target: "http.api.acp",
+                session = %id,
+                "group-context: read for launch injection failed: {e}"
+            );
+            return None;
+        }
+    };
+    crate::session::group_context::compose_launch_injection(&group_path, &context)
+}
+
 pub async fn acp_prompt(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1081,6 +1126,13 @@ pub async fn acp_prompt(
             }
         }
     }
+    // Group-context launch injection: prepend the group's shared context to the
+    // text forwarded to the agent on the session's first prompt, so a grouped
+    // session reliably starts with that context in window. Computed before the
+    // publish below (which would itself write the first UserPromptSent) and only
+    // the forwarded text is augmented; the persisted transcript keeps the user's
+    // original prompt. Best-effort: any failure leaves the prompt untouched.
+    let injection = group_context_launch_injection(&state, &id).await;
     // Publish the user's prompt into the event stream BEFORE forwarding
     // to the agent so the replay buffer / on-disk store captures it
     // even if the agent forward fails. The frontend treats UserPromptSent
@@ -1097,9 +1149,13 @@ pub async fn acp_prompt(
         id.clone(),
         req.text.clone(),
     ));
+    let forward_text = match injection {
+        Some(section) => format!("{section}{}", req.text),
+        None => req.text.clone(),
+    };
     match state
         .acp_supervisor
-        .send_prompt(&id, &req.text, &attachments)
+        .send_prompt(&id, &forward_text, &attachments)
         .await
     {
         Ok(()) => StatusCode::ACCEPTED.into_response(),

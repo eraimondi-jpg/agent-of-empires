@@ -75,6 +75,7 @@ yolo_mode_default = false
 agent_status_hooks = true
 smart_rename = true
 smart_rename_agent = ""    # "" = use the session's own agent; e.g. "codex"
+inject_group_context_at_launch = true
 auto_stop_idle_secs = 0   # 0 disables; e.g. 7200 = stop after 2h idle
 
 [session.acp_defaults.opencode]
@@ -90,6 +91,7 @@ effort = "high"
 | `agent_status_hooks` | `true` | Install status-detection hooks into the agent's config file. Codex uses the `[hooks]` table in its resolved `config.toml` (typically `~/.codex/config.toml`); other JSON-based agents use their settings JSON. Config-dir overrides are honored: `CODEX_HOME` (Codex), `CLAUDE_CONFIG_DIR` (Claude), or `CURSOR_CONFIG_DIR` (Cursor) set in the session's profile environment or in AoE's own environment redirects hooks to that directory instead of the `~/.codex` / `~/.claude` / `~/.cursor` default. When disabled, status detection falls back to tmux pane content parsing. Codex is hook-first, but known hook gaps are reconciled from pane content. |
 | `smart_rename` | `true` | Auto-rename a new structured view (ACP) session from its first message, using the session's own agent in one-shot mode (`claude -p`, `codex exec`, `opencode run`, `gemini -p`). Runs only while the session still carries its auto-generated civilization name; a manually named session is never touched. Title only: the worktree directory is not moved, since the running agent holds it. Skipped for sandboxed sessions (a host one-shot lacks the container's auth), agents with no one-shot mode, and command-overridden agents. Best-effort: a failed or timed-out call leaves the generated name and never affects the prompt. |
 | `smart_rename_agent` | `""` | Agent used for the one-shot smart-rename title call. Empty means use the session's own agent. Set it to a different one-shot-capable agent (`claude`, `codex`, `opencode`, `gemini`) to point rename at a cheaper or more obedient title model without changing the session's working agent. An unknown or one-shot-incapable value leaves the generated name. |
+| `inject_group_context_at_launch` | `true` | Prepend the group's shared context to the first prompt of a grouped structured view (ACP) session, so the agent reliably starts with it in context. Complements the persistent `CLAUDE.md` pointer. Applies only when the session belongs to a group and the group context is non-empty, and only the forwarded text is augmented (the persisted transcript keeps the user's original prompt). Best-effort: a failure leaves the prompt untouched. Terminal (tmux) sessions are unaffected; they rely on the persistent pointer. |
 | `agent_extra_args` | `{}` | Per-agent extra arguments appended after the binary (e.g., `{ opencode = "--port 8080" }`). |
 | `agent_command_override` | `{}` | Per-agent command override replacing the binary entirely (e.g., `{ claude = "my-claude-wrapper" }`). |
 | `custom_agents` | `{}` | User-defined agents: name to command mapping. Custom agent names appear in the TUI agent picker alongside built-in agents. |

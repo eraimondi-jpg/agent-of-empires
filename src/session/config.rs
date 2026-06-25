@@ -920,6 +920,18 @@ pub struct SessionConfig {
     #[setting(label = "Smart Session Rename", widget = "toggle", category = "Agents")]
     pub smart_rename: bool,
 
+    /// Prepend the group's shared context to the first prompt of a grouped
+    /// session at launch, so the agent starts with it already in context. Only
+    /// affects sessions that belong to a group and whose context is non-empty;
+    /// complements the persistent CLAUDE.md pointer.
+    #[serde(default = "default_true")]
+    #[setting(
+        label = "Inject Group Context At Launch",
+        widget = "toggle",
+        category = "Agents"
+    )]
+    pub inject_group_context_at_launch: bool,
+
     /// Agent used for the one-shot smart-rename title call. Empty means use the
     /// session's own agent. Set this to point smart rename at a cheaper or more
     /// obedient title model (e.g. codex or opencode) without changing the
@@ -1327,6 +1339,7 @@ impl Default for SessionConfig {
             agent_status_hooks: true,
             merge_hooks_into_selected_agent: true,
             smart_rename: true,
+            inject_group_context_at_launch: true,
             smart_rename_agent: String::new(),
             mouse_capture: true,
             custom_agents: HashMap::new(),

@@ -134,6 +134,23 @@ pub fn read_context(profile: &str, group_path: &str) -> Result<String> {
     Ok(fs::read_to_string(&paths.context).unwrap_or_default())
 }
 
+/// Build the delimited section prepended to a grouped session's first prompt at
+/// launch (Approach 2), complementing the persistent CLAUDE.md pointer (L1) so
+/// the agent reliably starts with the shared context already in its window.
+/// Returns `None` when the context is empty (or whitespace only), so an empty
+/// group never pollutes the first prompt.
+pub fn compose_launch_injection(group_path: &str, context: &str) -> Option<String> {
+    if context.trim().is_empty() {
+        return None;
+    }
+    Some(format!(
+        "# Shared group context (group: {group_path})\n\
+         This is your group's shared working memory. Read it before starting; \
+         record durable findings with `aoe context add`.\n\n\
+         {context}\n\n---\n\n"
+    ))
+}
+
 /// Overwrite `context.md` wholesale under the same advisory flock `append_entry`
 /// uses, so a TUI edit never races a concurrent append. The write is atomic: we
 /// stage a temp file in the group dir and rename it into place.
@@ -631,6 +648,22 @@ mod tests {
         assert_eq!(read_context(&p, "g1").unwrap(), "first body\n");
         write_context(&p, "g1", "replaced\n").unwrap();
         assert_eq!(read_context(&p, "g1").unwrap(), "replaced\n");
+    }
+
+    #[test]
+    fn compose_launch_injection_wraps_non_empty_context() {
+        let section = compose_launch_injection("work/sysid", "net B best, r2=0.97")
+            .expect("non-empty context must produce a section");
+        assert!(section.contains("group: work/sysid"));
+        assert!(section.contains("net B best, r2=0.97"));
+        assert!(section.contains("aoe context add"));
+        assert!(section.ends_with("---\n\n"));
+    }
+
+    #[test]
+    fn compose_launch_injection_returns_none_for_empty_context() {
+        assert!(compose_launch_injection("g1", "").is_none());
+        assert!(compose_launch_injection("g1", "   \n\t").is_none());
     }
 
     #[test]
