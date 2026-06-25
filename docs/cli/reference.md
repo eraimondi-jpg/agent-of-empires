@@ -33,6 +33,12 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe session unfavorite`↴](#aoe-session-unfavorite)
 * [`aoe session archive`↴](#aoe-session-archive)
 * [`aoe session unarchive`↴](#aoe-session-unarchive)
+* [`aoe context`↴](#aoe-context)
+* [`aoe context add`↴](#aoe-context-add)
+* [`aoe context show`↴](#aoe-context-show)
+* [`aoe context summary`↴](#aoe-context-summary)
+* [`aoe context summaries`↴](#aoe-context-summaries)
+* [`aoe context path`↴](#aoe-context-path)
 * [`aoe group`↴](#aoe-group)
 * [`aoe group list`↴](#aoe-group-list)
 * [`aoe group create`↴](#aoe-group-create)
@@ -117,6 +123,7 @@ Run without arguments to launch the TUI dashboard.
 * `status` — Show session status summary
 * `killall` — Force-stop everything aoe is running: the serve daemon, all agent workers, and all aoe tmux sessions. Destructive and unprompted
 * `session` — Manage session lifecycle (start, stop, attach, etc.)
+* `context` — Read and update per-group shared context
 * `group` — Manage groups for organizing sessions
 * `plugin` — Manage plugins (list, info, enable, disable)
 * `profile` — Manage profiles (separate workspaces)
@@ -586,6 +593,82 @@ Unarchive a session (restores it to its tier in the Attention sort)
 ###### **Arguments:**
 
 * `<IDENTIFIER>` — Session ID or title
+
+
+
+## `aoe context`
+
+Read and update per-group shared context
+
+**Usage:** `aoe context <COMMAND>`
+
+###### **Subcommands:**
+
+* `add` — Append a note to the current group's shared context
+* `show` — Print a group's context.md
+* `summary` — Print a group's outward-facing summary.md
+* `summaries` — List all groups with a one-line summary digest
+* `path` — Print canonical file paths for a group
+
+
+
+## `aoe context add`
+
+Append a note to the current group's shared context
+
+**Usage:** `aoe context add [OPTIONS] <TEXT>`
+
+###### **Arguments:**
+
+* `<TEXT>` — The note text to append
+
+###### **Options:**
+
+* `--group <GROUP>` — Group path; inferred from the current directory when omitted
+
+
+
+## `aoe context show`
+
+Print a group's context.md
+
+**Usage:** `aoe context show [OPTIONS]`
+
+###### **Options:**
+
+* `--group <GROUP>` — Group path; inferred from the current directory when omitted
+
+
+
+## `aoe context summary`
+
+Print a group's outward-facing summary.md
+
+**Usage:** `aoe context summary [OPTIONS]`
+
+###### **Options:**
+
+* `--group <GROUP>` — Group path; inferred from the current directory when omitted
+
+
+
+## `aoe context summaries`
+
+List all groups with a one-line summary digest
+
+**Usage:** `aoe context summaries`
+
+
+
+## `aoe context path`
+
+Print canonical file paths for a group
+
+**Usage:** `aoe context path [OPTIONS]`
+
+###### **Options:**
+
+* `--group <GROUP>` — Group path; inferred from the current directory when omitted
 
 
 
