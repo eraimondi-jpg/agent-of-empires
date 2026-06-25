@@ -9,6 +9,7 @@ use clap_complete::Shell;
 #[cfg(feature = "serve")]
 use super::acp::AcpCommands;
 use super::add::AddArgs;
+use super::context::ContextCommands;
 use super::extract_session_id::ExtractSessionIdArgs;
 use super::group::GroupCommands;
 use super::init::InitArgs;
@@ -119,6 +120,12 @@ pub enum Commands {
     Session {
         #[command(subcommand)]
         command: SessionCommands,
+    },
+
+    /// Read and update per-group shared context
+    Context {
+        #[command(subcommand)]
+        command: ContextCommands,
     },
 
     /// Manage groups for organizing sessions
@@ -288,6 +295,7 @@ pub fn command_name(command: &Commands) -> Option<&'static str> {
         // Hidden trap; never a user action, never counted.
         Commands::Stop { .. } => return None,
         Commands::Session { .. } => "session",
+        Commands::Context { .. } => "context",
         Commands::Group { .. } => "group",
         Commands::Plugin { .. } => "plugin",
         Commands::Profile { .. } => "profile",
