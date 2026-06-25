@@ -207,35 +207,14 @@ pub fn prune_retention(
         return;
     };
     let (clauses, patterns) = not_like_clauses(pinned_prefixes);
-    // Drop attachment blobs owned by the events this prune deletes, using the
-    // same predicate (and ordered before the events delete so the subquery
-    // still sees those rows). Tying it to the event predicate keeps a pinned
-    // event's blobs instead of assuming pinned events never carry
-    // attachments, so a future consumer can't strand a surviving event's blob.
-    let attachment_prune_sql = format!(
-        "DELETE FROM {attachments}
-         WHERE session_id = ?
-           AND seq IN (
-               SELECT seq FROM {events}
-               WHERE session_id = ?
-                 AND seq <= ?
-                 {clauses}
-           )"
-    );
-    let mut attachment_params: Vec<Value> = vec![
-        Value::Text(topic.to_owned()),
-        Value::Text(topic.to_owned()),
-        Value::Integer(cutoff),
-    ];
-    attachment_params.extend(patterns.iter().cloned().map(Value::Text));
-    if let Err(e) = conn.execute(&attachment_prune_sql, params_from_iter(attachment_params)) {
-        warn!(target: "events", "prune attachments {topic}: {e}");
-    }
+    // Prune the events first. If this fails, return before touching
+    // attachments: deleting blobs while their owning events survive would
+    // leave replay events pointing at missing data.
     let prune_sql = format!("DELETE FROM {events} WHERE session_id = ? AND seq <= ? {clauses}");
     let mut prune_params: Vec<Value> = vec![Value::Text(topic.to_owned()), Value::Integer(cutoff)];
     prune_params.extend(patterns.into_iter().map(Value::Text));
     match conn.execute(&prune_sql, params_from_iter(prune_params)) {
-        Ok(0) => {}
+        Ok(0) => return,
         Ok(pruned) => {
             debug!(
                 target: "events",
@@ -247,7 +226,24 @@ pub fn prune_retention(
         }
         Err(e) => {
             warn!(target: "events", "prune {topic}: {e}");
+            return;
         }
+    }
+    // Drop blobs whose owning event was just pruned (no longer present at or
+    // below the cutoff). Tying the delete to event existence rather than a
+    // flat `seq <= cutoff` keeps a pinned event's blobs, instead of assuming
+    // pinned variants never carry attachments, so a future consumer can't
+    // strand a surviving event's blob.
+    if let Err(e) = conn.execute(
+        &format!(
+            "DELETE FROM {attachments}
+             WHERE session_id = ?1
+               AND seq <= ?2
+               AND seq NOT IN (SELECT seq FROM {events} WHERE session_id = ?1)"
+        ),
+        params![topic, cutoff],
+    ) {
+        warn!(target: "events", "prune attachments {topic}: {e}");
     }
 }
 
