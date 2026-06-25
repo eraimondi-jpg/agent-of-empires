@@ -29,14 +29,14 @@ pub struct AddArgs {
     /// The note text to append
     pub text: String,
     /// Group path; inferred from the current directory when omitted
-    #[arg(long)]
+    #[arg(short = 'g', long)]
     pub group: Option<String>,
 }
 
 #[derive(Args)]
 pub struct GroupArg {
     /// Group path; inferred from the current directory when omitted
-    #[arg(long)]
+    #[arg(short = 'g', long)]
     pub group: Option<String>,
 }
 
