@@ -28,6 +28,7 @@ pub struct GroupContextPaths {
     pub state: PathBuf,
 }
 
+#[derive(Clone)]
 pub struct Author {
     pub title: String,
     pub tool: String,
@@ -549,9 +550,10 @@ pub mod wiring {
             "{start}
 This session belongs to the aoe group `{group}`. The group shares a context file.
 
-- Read `./{ctx}` before starting; it is the group's shared working memory.
-- Record durable findings with `aoe context add \"<note>\"`. Do not hand-edit `{ctx}`; concurrent edits are lost.
-- Discover other groups' summaries with `aoe context summaries`.
+- Read `./{ctx}` before you start; it is the group's shared working memory.
+- After each meaningful step or finding, immediately record a one-line note with `aoe context add \"<finding>\"`. Do this proactively, without being asked. Your session name is attached automatically, so the group and the curator know who found what.
+- Never hand-edit `{ctx}`; always append via `aoe context add` (concurrent hand-edits are lost).
+- To see what other groups know, run `aoe context summaries`.
 {end}",
             start = BLOCK_START,
             end = BLOCK_END,

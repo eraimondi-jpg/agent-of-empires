@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 use clap::{Args, Subcommand};
 
 use crate::session::group_context::{self, wiring, Author};
-use crate::session::Storage;
+use crate::session::{Instance, Storage};
 
 #[derive(Subcommand)]
 pub enum ContextCommands {
@@ -82,17 +82,65 @@ fn add(profile: &str, args: AddArgs) -> Result<()> {
     Ok(())
 }
 
-/// Resolve only the group: explicit flag, else cwd marker, else cwd to instance.
+/// Identify the writing session as reliably as possible. `AOE_INSTANCE_ID` is
+/// set per agent and stays unique even when several sessions share one working
+/// directory, so it is preferred; the cwd marker is the fallback.
+fn writer(instances: &[Instance], cwd: &Path) -> Option<(String, Author)> {
+    if let Ok(id) = std::env::var("AOE_INSTANCE_ID") {
+        if !id.is_empty() {
+            if let Some(i) = instances.iter().find(|i| i.id == id) {
+                return Some(to_group_author(i));
+            }
+        }
+    }
+    let m = read_marker(cwd)?;
+    instances
+        .iter()
+        .find(|i| i.id == m.session_id)
+        .map(to_group_author)
+}
+
+/// A grouped session whose project path contains `cwd`. Ambiguous when several
+/// sessions share a directory, so it is only a fallback after `writer`.
+fn cwd_match(instances: &[Instance], cwd: &Path) -> Option<(String, Author)> {
+    let cwd = cwd.to_string_lossy();
+    instances
+        .iter()
+        .find(|i| !i.group_path.is_empty() && cwd.starts_with(i.project_path.as_str()))
+        .map(to_group_author)
+}
+
+fn to_group_author(i: &Instance) -> (String, Author) {
+    (
+        i.group_path.clone(),
+        Author {
+            title: i.title.clone(),
+            tool: i.tool.clone(),
+            session_id: i.id.clone(),
+        },
+    )
+}
+
+/// Resolve only the group: explicit flag, else the writing session, else a cwd
+/// match, else the marker's group.
 pub fn resolve_group(profile: &str, explicit: Option<String>) -> Result<String> {
     if let Some(g) = explicit {
         return Ok(g);
     }
+    let (instances, _) = Storage::new_unwatched(profile)?.load_with_groups()?;
     let cwd = std::env::current_dir()?;
-    if let Some(m) = read_marker(&cwd) {
-        return Ok(m.group_path);
+    if let Some((g, _)) = writer(&instances, &cwd) {
+        if !g.is_empty() {
+            return Ok(g);
+        }
     }
-    if let Some((g, _)) = group_from_instance(profile, &cwd)? {
+    if let Some((g, _)) = cwd_match(&instances, &cwd) {
         return Ok(g);
+    }
+    if let Some(m) = read_marker(&cwd) {
+        if !m.group_path.is_empty() {
+            return Ok(m.group_path);
+        }
     }
     bail!("not inside a grouped aoe session; pass --group <path>");
 }
@@ -102,62 +150,42 @@ fn resolve_group_and_author(
     explicit: Option<String>,
     cwd: &Path,
 ) -> Result<(String, Author)> {
-    // Prefer the marker: it carries the session id for attribution.
-    if explicit.is_none() {
-        if let Some(m) = read_marker(cwd) {
-            if let Some(author) = author_for_session(profile, &m.session_id)? {
-                return Ok((m.group_path, author));
-            }
-        }
-    }
-    if let Some((g, author)) = group_from_instance(profile, cwd)? {
-        let group = explicit.unwrap_or(g);
-        return Ok((group, author));
-    }
-    if let Some(g) = explicit {
-        return Ok((
-            g,
-            Author {
+    let (instances, _) = Storage::new_unwatched(profile)?.load_with_groups()?;
+    let me = writer(&instances, cwd);
+    let by_cwd = cwd_match(&instances, cwd);
+
+    let author = me
+        .as_ref()
+        .map(|(_, a)| a.clone())
+        .or_else(|| by_cwd.as_ref().map(|(_, a)| a.clone()));
+
+    let group = explicit
+        .or_else(|| {
+            me.as_ref()
+                .map(|(g, _)| g.clone())
+                .filter(|g| !g.is_empty())
+        })
+        .or_else(|| by_cwd.as_ref().map(|(g, _)| g.clone()))
+        .or_else(|| {
+            read_marker(cwd)
+                .map(|m| m.group_path)
+                .filter(|g| !g.is_empty())
+        });
+
+    match group {
+        Some(group) => Ok((
+            group,
+            author.unwrap_or_else(|| Author {
                 title: "unknown".into(),
                 tool: "unknown".into(),
                 session_id: String::new(),
-            },
-        ));
+            }),
+        )),
+        None => bail!("not inside a grouped aoe session; pass --group <path>"),
     }
-    bail!("not inside a grouped aoe session; pass --group <path>");
 }
 
 fn read_marker(cwd: &Path) -> Option<wiring::Marker> {
     let s = std::fs::read_to_string(cwd.join(wiring::MARKER_NAME)).ok()?;
     wiring::parse_marker(&s)
-}
-
-fn author_for_session(profile: &str, session_id: &str) -> Result<Option<Author>> {
-    let (instances, _) = Storage::new_unwatched(profile)?.load_with_groups()?;
-    Ok(instances
-        .into_iter()
-        .find(|i| i.id == session_id)
-        .map(|i| Author {
-            title: i.title,
-            tool: i.tool,
-            session_id: i.id,
-        }))
-}
-
-fn group_from_instance(profile: &str, cwd: &Path) -> Result<Option<(String, Author)>> {
-    let (instances, _) = Storage::new_unwatched(profile)?.load_with_groups()?;
-    let cwd = cwd.to_string_lossy();
-    Ok(instances
-        .into_iter()
-        .find(|i| !i.group_path.is_empty() && cwd.starts_with(i.project_path.as_str()))
-        .map(|i| {
-            (
-                i.group_path.clone(),
-                Author {
-                    title: i.title,
-                    tool: i.tool,
-                    session_id: i.id,
-                },
-            )
-        }))
 }
