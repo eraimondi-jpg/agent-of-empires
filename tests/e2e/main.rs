@@ -33,6 +33,7 @@ mod filewatch_config_tui;
 mod filewatch_tui_burst_reload;
 mod filewatch_tui_dynamic_profile;
 mod filewatch_tui_reload;
+mod group_context_e2e;
 mod intro;
 mod logs;
 mod new_session;

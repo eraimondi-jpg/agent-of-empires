@@ -31,6 +31,7 @@ use crate::tui::dialogs::PaletteGroup;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActionId {
     Quit,
+    ShowGroupContext,
     Help,
     ToolPicker,
     SearchStart,
@@ -752,6 +753,22 @@ pub static BINDINGS: &[Binding] = &[
             serve_only: false,
         }),
     },
+    Binding {
+        id: ActionId::ShowGroupContext,
+        non_strict: &[k('v')],
+        strict: &[k('V')],
+        context: Context::Always,
+        help: Some(HelpMeta {
+            section: HelpSection::Views,
+            desc: "View group context",
+        }),
+        palette: Some(PaletteMeta {
+            title: "View group context",
+            keywords: &["group", "context", "shared", "notes"],
+            group: PaletteGroup::Views,
+            serve_only: false,
+        }),
+    },
 ];
 
 /// Stable palette/test id for an action (matches the legacy `builtin_commands`
@@ -767,6 +784,7 @@ pub fn palette_id(id: ActionId) -> &'static str {
         ActionId::Stop => "stop",
         ActionId::Delete => "delete",
         ActionId::Rename => "rename",
+        ActionId::ShowGroupContext => "show-group-context",
         ActionId::SetWorktreeName => "set-worktree-name",
         ActionId::Diff => "diff",
         ActionId::Serve => "serve",

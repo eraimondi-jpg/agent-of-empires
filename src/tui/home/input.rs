@@ -1563,6 +1563,16 @@ impl HomeView {
             return None;
         }
 
+        if let Some(dialog) = &mut self.group_context_viewer {
+            match dialog.handle_key(key) {
+                DialogResult::Continue => {}
+                DialogResult::Cancel | DialogResult::Submit(_) => {
+                    self.group_context_viewer = None;
+                }
+            }
+            return None;
+        }
+
         if let Some(dialog) = &mut self.telemetry_consent_dialog {
             match dialog.handle_key(key) {
                 DialogResult::Continue => {}
@@ -2402,6 +2412,7 @@ impl HomeView {
             ActionId::Stop => self.stop_selected(),
             ActionId::Delete => self.open_delete_for_selected(),
             ActionId::Rename => self.open_rename_for_selected(),
+            ActionId::ShowGroupContext => self.open_group_context_viewer(),
             ActionId::SetWorktreeName => self.open_worktree_name_for_selected(),
             ActionId::Diff => self.open_diff_for_selected(),
             ActionId::Serve => self.open_serve(),
@@ -3808,6 +3819,17 @@ impl HomeView {
     ///
     /// Shared by the `'r'` / `'R'` key handlers and the right-click
     /// context menu so all three entry points stay byte-identical.
+    /// Open the read-only group context viewer for the selected group row.
+    /// No-op when the selected row is not a group.
+    pub(super) fn open_group_context_viewer(&mut self) {
+        if let Some(group) = self.selected_group.clone() {
+            let profile = self.selected_group_profile.clone().unwrap_or_default();
+            self.group_context_viewer = Some(crate::tui::dialogs::GroupContextDialog::new(
+                &profile, &group,
+            ));
+        }
+    }
+
     pub(super) fn open_rename_for_selected(&mut self) {
         if let Some(id) = self.selected_session.clone() {
             let Some(inst) = self.get_instance(&id) else {
