@@ -112,17 +112,28 @@ pub fn validate_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Create the worker directory if absent, owner-only (0700) so other users
-/// on a shared host cannot enumerate worker ids.
+/// Create the worker directory if absent and enforce owner-only (0700) so
+/// other users on a shared host cannot enumerate worker ids. The permission
+/// is (re)applied on every call, including a pre-existing directory, and a
+/// failure to set it is propagated rather than swallowed: the isolation
+/// guarantee is load-bearing, so callers fail closed instead of proceeding
+/// with a world-readable worker dir.
 pub fn ensure_dir(dir: &Path) -> Result<()> {
     if !dir.exists() {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("creating worker dir at {}", dir.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
-        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).with_context(
+            || {
+                format!(
+                    "setting owner-only perms on worker dir at {}",
+                    dir.display()
+                )
+            },
+        )?;
     }
     Ok(())
 }
@@ -207,6 +218,9 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    // On non-Unix `is_pid_alive` deliberately returns false, so this
+    // liveness expectation only holds under Unix.
+    #[cfg(unix)]
     #[test]
     fn is_pid_alive_self() {
         assert!(is_pid_alive(std::process::id()));
