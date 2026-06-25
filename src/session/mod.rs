@@ -5,6 +5,7 @@ pub(crate) mod capture;
 pub mod civilizations;
 pub mod config;
 pub(crate) mod container_config;
+pub mod curator;
 pub mod deletion;
 pub(crate) mod environment;
 pub mod group_context;
