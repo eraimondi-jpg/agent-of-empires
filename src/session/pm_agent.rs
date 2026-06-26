@@ -238,6 +238,34 @@ pub fn ensure_pm_session(profile: &str, group_path: &str) -> Result<Option<Strin
     Ok(Some(id))
 }
 
+/// Ensure every group in `profile` has a PM. Backfills groups created before the
+/// PM feature existed (the create-time hook does not fire for already-existing
+/// groups). Idempotent: `ensure_pm_session` skips groups that already have one,
+/// and the whole thing is a no-op when `project_manager.enabled` is false.
+pub fn backfill_pms(profile: &str) -> Result<()> {
+    let (_instances, groups) = Storage::new_unwatched(profile)?.load_with_groups()?;
+    for g in &groups {
+        if g.path.trim().is_empty() {
+            continue;
+        }
+        if let Err(e) = ensure_pm_session(profile, &g.path) {
+            tracing::warn!(target: "pm", "backfill_pms: {}: {e}", g.path);
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort PM backfill across all profiles, run once at startup so existing
+/// groups get their PM without needing a fresh group-create.
+pub fn backfill_pms_all_profiles() {
+    let Ok(profiles) = super::list_profiles() else {
+        return;
+    };
+    for p in profiles {
+        let _ = backfill_pms(&p);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -350,7 +350,10 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Worktree { command }) => cli::worktree::run(&profile, command).await,
         #[cfg(feature = "serve")]
-        Some(Commands::Serve(args)) => cli::serve::run(&profile, args).await,
+        Some(Commands::Serve(args)) => {
+            agent_of_empires::session::pm_agent::backfill_pms_all_profiles();
+            cli::serve::run(&profile, args).await
+        }
         #[cfg(feature = "serve")]
         Some(Commands::Url(args)) => cli::url::run(args),
         #[cfg(feature = "serve")]
@@ -370,6 +373,7 @@ async fn main() -> Result<()> {
                 (None, Some(b)) => Some(b),
                 (None, None) => None,
             };
+            agent_of_empires::session::pm_agent::backfill_pms_all_profiles();
             tui::run(&profile, combined).await
         }
         _ => unreachable!(),
