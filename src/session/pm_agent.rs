@@ -68,6 +68,22 @@ pub fn pm_exists(instances: &[Instance], group_path: &str) -> bool {
     pm_for_group(instances, group_path).is_some()
 }
 
+/// A PM that the user has started at least once (`pm_activated`) is a revive
+/// candidate on startup. Liveness (is the tmux pane actually up) is checked by
+/// the caller, which already holds the batched pane metadata; this predicate is
+/// the PM-specific half of the gate, mirroring `recovery::is_recovery_candidate`
+/// for normal sessions (which skips `Status::Stopped` PMs).
+pub fn should_revive_pm(instance: &Instance) -> bool {
+    instance.is_project_manager() && instance.pm_activated
+}
+
+/// Activated PMs in `instances`, in iteration order. Pure selector for the
+/// startup revive pass and its unit test; the caller filters out the ones whose
+/// pane is already live.
+pub fn activated_pms(instances: &[Instance]) -> Vec<&Instance> {
+    instances.iter().filter(|i| should_revive_pm(i)).collect()
+}
+
 /// Leaf name of a `/`-delimited group path, used for the PM's title.
 fn group_leaf(group_path: &str) -> &str {
     group_path.rsplit('/').next().unwrap_or(group_path)
@@ -275,6 +291,28 @@ mod tests {
         let storage = Storage::new_unwatched("default").unwrap();
         let (instances, _g) = storage.load_with_groups().unwrap();
         assert!(!pm_exists(&instances, "g1"));
+    }
+
+    #[test]
+    fn revive_selector_picks_only_activated_pms() {
+        let mut normal = Instance::new("worker", "/tmp/w");
+        normal.group_path = "g".to_string();
+
+        let mut dormant_pm = Instance::new("PM - g", "/tmp/pm1");
+        dormant_pm.group_path = "g".to_string();
+        dormant_pm.is_project_manager = true;
+        // pm_activated stays false: never started, so it must NOT be revived.
+
+        let mut activated_pm = Instance::new("PM - h", "/tmp/pm2");
+        activated_pm.group_path = "h".to_string();
+        activated_pm.is_project_manager = true;
+        activated_pm.pm_activated = true;
+
+        let instances = vec![normal, dormant_pm, activated_pm.clone()];
+        let revivable = activated_pms(&instances);
+        assert_eq!(revivable.len(), 1, "only the activated PM is revivable");
+        assert_eq!(revivable[0].id, activated_pm.id);
+        assert!(should_revive_pm(&activated_pm));
     }
 
     #[test]

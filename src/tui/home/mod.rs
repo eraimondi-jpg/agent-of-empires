@@ -3144,7 +3144,14 @@ impl HomeView {
             if has_live_tmux {
                 continue;
             }
-            if !crate::session::recovery::is_recovery_candidate(inst) {
+            // An activated PM is dormant (`Status::Stopped`), so
+            // `is_recovery_candidate` rejects it; revive it here instead, gated
+            // on the per-profile `project_manager.enabled`.
+            let revive_pm = crate::session::pm_agent::should_revive_pm(inst)
+                && resolve_config_or_warn(&inst.effective_profile())
+                    .project_manager
+                    .enabled;
+            if !revive_pm && !crate::session::recovery::is_recovery_candidate(inst) {
                 continue;
             }
             // Set Status::Starting AND last_start_time: the existing 3s

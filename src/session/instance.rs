@@ -537,6 +537,12 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_project_manager: bool,
 
+    /// Set the first time this PM is started by the user. Once true, the PM is
+    /// revived (started fresh) on every aoe startup; until then it stays
+    /// dormant. Only meaningful when `is_project_manager` is true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pm_activated: bool,
+
     // Git worktree integration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_info: Option<WorktreeInfo>,
@@ -947,6 +953,7 @@ impl Instance {
             plugin_meta: std::collections::BTreeMap::new(),
             scratch: false,
             is_project_manager: false,
+            pm_activated: false,
             worktree_info: None,
             workspace_info: None,
             sandbox_info: None,
@@ -2650,6 +2657,13 @@ impl Instance {
         self.status = Status::Starting;
         self.last_start_time = Some(std::time::Instant::now());
 
+        // First real launch of a PM flips the persisted `pm_activated` latch so
+        // future startups revive it. Runs here (post-reconcile, post-pane) so
+        // `reconcile_from_disk`'s `*self = disk` cannot clobber the flag.
+        if self.is_project_manager() && !self.pm_activated {
+            self.mark_pm_activated(profile);
+        }
+
         // Apply status bar options in a background thread to avoid blocking
         // the TUI on the multiple tmux subprocess calls they require.
         let session_name = session_name.to_string();
@@ -2679,6 +2693,31 @@ impl Instance {
                     "Failed to spawn finalize-tmux thread"
                 );
             }
+        }
+    }
+
+    /// Persist `pm_activated = true` for this PM, in memory and on disk.
+    /// Best-effort: a storage failure leaves the in-memory flag set (so the
+    /// running session behaves correctly) and warns; the next launch retries.
+    fn mark_pm_activated(&mut self, profile: &str) {
+        self.pm_activated = true;
+        let storage = match super::storage::Storage::new(profile, self.resolve_file_watch()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(target: "session.pm",
+                    instance = %self.id, "failed to open storage to persist pm_activated: {e}");
+                return;
+            }
+        };
+        let id = self.id.clone();
+        if let Err(e) = storage.update(|instances, _groups| {
+            if let Some(inst) = instances.iter_mut().find(|i| i.id == id) {
+                inst.pm_activated = true;
+            }
+            Ok(())
+        }) {
+            tracing::warn!(target: "session.pm",
+                instance = %self.id, "failed to persist pm_activated: {e}");
         }
     }
 

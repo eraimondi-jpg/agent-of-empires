@@ -3387,6 +3387,19 @@ async fn reap_idle_sessions(state: &Arc<AppState>, last_reap: &mut Option<std::t
 ///
 /// Uses `batch_pane_metadata()` instead of per-instance probes to keep
 /// the listener-bind path under ~20ms regardless of session count.
+/// Startup-recovery gate for the daemon: normal sessions go through
+/// `is_recovery_candidate`; an activated PM is dormant (`Status::Stopped`, which
+/// that predicate rejects), so revive it here when `project_manager.enabled`.
+fn daemon_should_recover(inst: &crate::session::Instance) -> bool {
+    if crate::session::recovery::is_recovery_candidate(inst) {
+        return true;
+    }
+    crate::session::pm_agent::should_revive_pm(inst)
+        && crate::session::resolve_config_or_warn(&inst.effective_profile())
+            .project_manager
+            .enabled
+}
+
 async fn daemon_startup_recovery_mark(
     state: Arc<AppState>,
 ) -> Option<(
@@ -3440,7 +3453,7 @@ async fn daemon_startup_recovery_mark(
                     .get(&session_name)
                     .map(|m| !m.pane_dead)
                     .unwrap_or(false);
-                !has_live_tmux && crate::session::recovery::is_recovery_candidate(i)
+                !has_live_tmux && daemon_should_recover(i)
             })
             .cloned()
             .collect()
@@ -3537,7 +3550,7 @@ async fn daemon_startup_recovery_cascade(
                             .get(&session_name)
                             .map(|m| !m.pane_dead)
                             .unwrap_or(false);
-                        !has_live_tmux && crate::session::recovery::is_recovery_candidate(i)
+                        !has_live_tmux && daemon_should_recover(i)
                     })
                     .unwrap_or(false)
             };

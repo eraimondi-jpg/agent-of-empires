@@ -1025,7 +1025,7 @@ impl HomeView {
 
         use std::borrow::Cow;
 
-        let (icon, text, style): (&str, Cow<str>, Style) = match item {
+        let (mut icon, mut text, mut style): (&str, Cow<str>, Style) = match item {
             Item::Group {
                 path,
                 name,
@@ -1294,6 +1294,20 @@ impl HomeView {
                 }
             }
         };
+
+        // Pinned PM rows read as a distinct role, not a normal chat: a fixed
+        // badge glyph and `PM ` prefix in the accent color, overriding the
+        // status-derived icon/style the per-mode arms computed above.
+        if let Item::Session { id, .. } = item {
+            if self
+                .get_instance(id)
+                .is_some_and(|inst| inst.is_project_manager())
+            {
+                icon = ICON_PINNED;
+                text = Cow::Owned(format!("PM {}", text));
+                style = Style::default().fg(theme.accent).bold();
+            }
+        }
 
         let mut line_spans = Vec::with_capacity(5);
         line_spans.push(Span::raw(indent));

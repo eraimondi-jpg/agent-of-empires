@@ -912,6 +912,11 @@ fn flatten_group(
 
     sort_sessions(&mut group_sessions, sort_order);
 
+    // Pin the group's Project Manager to the top, immediately under the header,
+    // ahead of the normal sort. `sort_by_key` is stable, so the other sessions
+    // keep their `sort_sessions` order.
+    group_sessions.sort_by_key(|i| !i.is_project_manager());
+
     for inst in group_sessions {
         items.push(Item::Session {
             id: inst.id.clone(),
@@ -1194,6 +1199,33 @@ mod tests {
 
         // First item should be ungrouped session
         assert!(matches!(items[0], Item::Session { .. }));
+    }
+
+    #[test]
+    fn test_pm_pinned_first_among_group_sessions() {
+        // Two normal sessions plus a PM, all in the same group. Whatever the
+        // base sort, the PM must be the first session under the header.
+        let mut a = Instance::new("alpha", "/tmp/a");
+        a.group_path = "work".to_string();
+        let mut b = Instance::new("bravo", "/tmp/b");
+        b.group_path = "work".to_string();
+        let mut pm = Instance::new("PM - work", "/tmp/pm");
+        pm.group_path = "work".to_string();
+        pm.is_project_manager = true;
+
+        // Order the input so the PM is last; pinning must still float it up.
+        let instances = vec![a, b, pm];
+        let tree = GroupTree::new_with_groups(&instances, &[]);
+        let items = flatten_tree(&tree, &instances, SortOrder::AZ);
+
+        let first_session = items.iter().find_map(|item| match item {
+            Item::Session { id, .. } => instances.iter().find(|i| &i.id == id),
+            _ => None,
+        });
+        assert!(
+            first_session.is_some_and(|i| i.is_project_manager()),
+            "the PM must be the first session row in its group"
+        );
     }
 
     #[test]
