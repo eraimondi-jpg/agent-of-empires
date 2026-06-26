@@ -1025,7 +1025,7 @@ impl HomeView {
 
         use std::borrow::Cow;
 
-        let (mut icon, mut text, mut style): (&str, Cow<str>, Style) = match item {
+        let (mut icon, text, mut style): (&str, Cow<str>, Style) = match item {
             Item::Group {
                 path,
                 name,
