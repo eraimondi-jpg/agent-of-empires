@@ -11,6 +11,7 @@ use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+use super::get_app_dir;
 use super::get_profile_dir;
 use super::Instance;
 
@@ -343,6 +344,166 @@ fn add_git_excludes(cwd: &Path, names: &[&str]) {
     }
 }
 
+/// Filename of the auto-capture Stop hook script, written under the app dir.
+const CAPTURE_HOOK_FILENAME: &str = "aoe-context-capture-hook.sh";
+
+/// Substring that uniquely identifies our Stop-hook entry in a worktree's
+/// `.claude/settings.local.json`, so a merge can find and replace only ours.
+const CAPTURE_HOOK_MARKER: &str = "aoe-context-capture-hook.sh";
+
+/// POSIX-sh Stop hook embedded verbatim and (re)written on attach. Synchronous,
+/// recursion-guarded, and best-effort: it extracts the one durable finding from
+/// a substantial assistant turn and records it via `aoe context add`.
+const CAPTURE_HOOK_SCRIPT: &str = r#"#!/bin/sh
+# Managed by aoe (group-context capture). Regenerated on attach; do not edit.
+[ -n "$AOE_STOP_HOOK_RUNNING" ] && exit 0
+[ -n "$AOE_INSTANCE_ID" ] || exit 0
+MODEL=${1:-sonnet}
+input=$(cat)
+msg=$(printf '%s' "$input" | jq -r '.last_assistant_message // empty' 2>/dev/null)
+[ "${#msg}" -ge 200 ] || exit 0
+LOG="${XDG_CONFIG_HOME:-$HOME/.config}/agent-of-empires/curator-hook.log"
+PROMPT='Extract the ONE most important durable finding (a result, decision, key file path, or fact a teammate will need later) from this assistant turn, as a single concise line. Omit chit-chat, questions, and next-step plans. If nothing is durable, output exactly: NONE'
+finding=$(cd /tmp && printf '%s' "$msg" | env -u AOE_INSTANCE_ID AOE_STOP_HOOK_RUNNING=1 timeout 60 claude -p --model "$MODEL" "$PROMPT" 2>/dev/null | head -c 400 | tr '\n' ' ')
+ts=$(date -u +%Y-%m-%dT%H:%MZ)
+case "$finding" in
+  ''|NONE|NONE.|none|None) printf '%s skip\n' "$ts" >> "$LOG" 2>/dev/null ;;
+  *) aoe context add "$finding" >/dev/null 2>&1 && printf '%s add: %s\n' "$ts" "$finding" >> "$LOG" 2>/dev/null ;;
+esac
+exit 0
+"#;
+
+/// Write the capture-hook script under the app dir, only when missing or its
+/// contents differ, and return its path. Idempotent so repeated attaches are
+/// cheap and never rewrite an unchanged file.
+fn ensure_capture_hook_script() -> Result<PathBuf> {
+    let path = get_app_dir()?.join(CAPTURE_HOOK_FILENAME);
+    if fs::read_to_string(&path).ok().as_deref() != Some(CAPTURE_HOOK_SCRIPT) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, CAPTURE_HOOK_SCRIPT)?;
+    }
+    Ok(path)
+}
+
+fn settings_local_path(cwd: &Path) -> PathBuf {
+    cwd.join(".claude").join("settings.local.json")
+}
+
+/// True when a Stop-hook group entry (`{"hooks":[{"command":"..."}]}`) contains
+/// a nested command referencing our capture script.
+fn stop_entry_is_ours(entry: &serde_json::Value) -> bool {
+    entry
+        .get("hooks")
+        .and_then(|h| h.as_array())
+        .map(|arr| {
+            arr.iter().any(|h| {
+                h.get("command")
+                    .and_then(|c| c.as_str())
+                    .map(|c| c.contains(CAPTURE_HOOK_MARKER))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Merge our Stop hook into the worktree's `.claude/settings.local.json`,
+/// preserving any pre-existing JSON and other hooks. Our entry is identified by
+/// its nested command referencing the capture script, so re-running replaces
+/// exactly one entry (idempotent). Best-effort: returns `Err` only on IO/parse
+/// failures the caller logs and swallows.
+fn install_capture_hook(cwd: &Path, script_path: &Path, model: &str) -> Result<()> {
+    let path = settings_local_path(cwd);
+    let mut root: serde_json::Value = match fs::read_to_string(&path) {
+        Ok(raw) => {
+            serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?
+        }
+        Err(_) => serde_json::json!({}),
+    };
+    if !root.is_object() {
+        root = serde_json::json!({});
+    }
+
+    let obj = root.as_object_mut().expect("root is an object");
+    let hooks = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
+    if !hooks.is_object() {
+        *hooks = serde_json::json!({});
+    }
+    let hooks_obj = hooks.as_object_mut().expect("hooks is an object");
+    let stop = hooks_obj
+        .entry("Stop")
+        .or_insert_with(|| serde_json::json!([]));
+    if !stop.is_array() {
+        *stop = serde_json::json!([]);
+    }
+    let stop_arr = stop.as_array_mut().expect("Stop is an array");
+    stop_arr.retain(|e| !stop_entry_is_ours(e));
+    let command = format!("sh {} {}", script_path.display(), model);
+    stop_arr.push(serde_json::json!({
+        "hooks": [ { "type": "command", "command": command } ]
+    }));
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, serde_json::to_string_pretty(&root)?)?;
+    add_git_excludes(cwd, &[".claude/settings.local.json"]);
+    Ok(())
+}
+
+/// Remove only our Stop-hook entry from the worktree's settings, preserving
+/// everything else; drop an empty `Stop` key. No-op when the file is absent or
+/// contains nothing of ours.
+fn remove_capture_hook(cwd: &Path) -> Result<()> {
+    let path = settings_local_path(cwd);
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let mut root: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    let Some(stop) = root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut("Stop"))
+        .and_then(|s| s.as_array_mut())
+    else {
+        return Ok(());
+    };
+    let before = stop.len();
+    stop.retain(|e| !stop_entry_is_ours(e));
+    let changed = stop.len() != before;
+    if stop.is_empty() {
+        if let Some(hooks) = root.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+            hooks.remove("Stop");
+        }
+    }
+    if changed {
+        fs::write(&path, serde_json::to_string_pretty(&root)?)?;
+    }
+    Ok(())
+}
+
+/// Reconcile the capture Stop hook for a claude worktree per the profile's
+/// curator config: install when `capture` is on, remove when off. Best-effort;
+/// any failure is logged and never breaks attach.
+fn reconcile_capture_hook(profile: &str, cwd: &Path) {
+    let curator = super::profile_config::resolve_config_or_warn(profile).curator;
+    if curator.capture {
+        match ensure_capture_hook_script() {
+            Ok(script) => {
+                if let Err(e) = install_capture_hook(cwd, &script, &curator.capture_model) {
+                    tracing::warn!("group-context: capture-hook install failed: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("group-context: capture-hook script write failed: {e}"),
+        }
+    } else if let Err(e) = remove_capture_hook(cwd) {
+        tracing::warn!("group-context: capture-hook removal failed: {e}");
+    }
+}
+
 /// Surface the group's context into a session's working dir and make the agent
 /// persistently aware of it (Approach 1). Best-effort: a failure here logs a
 /// warning and never blocks a session launch.
@@ -407,6 +568,11 @@ pub fn attach(
             }
         }
     }
+
+    // 5. Auto-capture Stop hook (claude only), reconciled from curator config.
+    if wiring::instruction_filename_for_tool(tool) == Some("CLAUDE.md") {
+        reconcile_capture_hook(profile, cwd);
+    }
     Ok(())
 }
 
@@ -431,6 +597,9 @@ pub fn detach(project_path: &str, tool: &str) -> Result<()> {
                 let _ = std::fs::write(&ifile, cleaned);
             }
         }
+    }
+    if let Err(e) = remove_capture_hook(cwd) {
+        tracing::warn!("group-context: capture-hook removal failed: {e}");
     }
     Ok(())
 }
@@ -465,6 +634,125 @@ pub fn reconcile_all(instances: &[Instance]) {
             &inst.tool,
             &inst.id,
         );
+    }
+}
+
+#[cfg(test)]
+mod capture_hook_tests {
+    use super::*;
+    use serial_test::serial;
+
+    fn temp_home() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path());
+        std::env::set_var("HOME", tmp.path());
+        tmp
+    }
+
+    fn read_settings(cwd: &Path) -> serde_json::Value {
+        let raw = std::fs::read_to_string(settings_local_path(cwd)).unwrap();
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    fn stop_commands(v: &serde_json::Value) -> Vec<String> {
+        v["hooks"]["Stop"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|e| e["hooks"][0]["command"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    #[serial]
+    fn install_into_missing_file_creates_stop_entry() {
+        let tmp = temp_home();
+        let cwd = tmp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let script = Path::new("/app/aoe-context-capture-hook.sh");
+
+        install_capture_hook(&cwd, script, "sonnet").unwrap();
+        let v = read_settings(&cwd);
+        let cmds = stop_commands(&v);
+        assert_eq!(cmds.len(), 1);
+        assert!(cmds[0].contains("aoe-context-capture-hook.sh"));
+        assert!(cmds[0].ends_with("sonnet"));
+    }
+
+    #[test]
+    #[serial]
+    fn install_preserves_unrelated_json() {
+        let tmp = temp_home();
+        let cwd = tmp.path().join("repo");
+        std::fs::create_dir_all(cwd.join(".claude")).unwrap();
+        std::fs::write(
+            settings_local_path(&cwd),
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo other"}]}]},"otherKey":1}"#,
+        )
+        .unwrap();
+        let script = Path::new("/app/aoe-context-capture-hook.sh");
+
+        install_capture_hook(&cwd, script, "sonnet").unwrap();
+        let v = read_settings(&cwd);
+        let cmds = stop_commands(&v);
+        assert!(cmds.iter().any(|c| c == "echo other"));
+        assert!(cmds
+            .iter()
+            .any(|c| c.contains("aoe-context-capture-hook.sh")));
+        assert_eq!(v["otherKey"], serde_json::json!(1));
+    }
+
+    #[test]
+    #[serial]
+    fn install_is_idempotent() {
+        let tmp = temp_home();
+        let cwd = tmp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let script = Path::new("/app/aoe-context-capture-hook.sh");
+
+        install_capture_hook(&cwd, script, "sonnet").unwrap();
+        install_capture_hook(&cwd, script, "sonnet").unwrap();
+        let v = read_settings(&cwd);
+        let ours = stop_commands(&v)
+            .into_iter()
+            .filter(|c| c.contains("aoe-context-capture-hook.sh"))
+            .count();
+        assert_eq!(ours, 1);
+    }
+
+    #[test]
+    #[serial]
+    fn remove_deletes_only_our_entry() {
+        let tmp = temp_home();
+        let cwd = tmp.path().join("repo");
+        std::fs::create_dir_all(cwd.join(".claude")).unwrap();
+        std::fs::write(
+            settings_local_path(&cwd),
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo other"}]}]},"otherKey":1}"#,
+        )
+        .unwrap();
+        let script = Path::new("/app/aoe-context-capture-hook.sh");
+        install_capture_hook(&cwd, script, "sonnet").unwrap();
+
+        remove_capture_hook(&cwd).unwrap();
+        let v = read_settings(&cwd);
+        let cmds = stop_commands(&v);
+        assert_eq!(cmds, vec!["echo other".to_string()]);
+        assert_eq!(v["otherKey"], serde_json::json!(1));
+    }
+
+    #[test]
+    #[serial]
+    fn ensure_script_writes_and_is_idempotent() {
+        let _tmp = temp_home();
+        let path = ensure_capture_hook_script().unwrap();
+        assert!(path.exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), CAPTURE_HOOK_SCRIPT);
+        let again = ensure_capture_hook_script().unwrap();
+        assert_eq!(again, path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), CAPTURE_HOOK_SCRIPT);
     }
 }
 

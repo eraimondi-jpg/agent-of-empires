@@ -1645,6 +1645,16 @@ pub struct CuratorConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[setting(label = "Curator agent", widget = "optional_text")]
     pub agent: Option<String>,
+
+    /// Auto-capture each agent's findings into the group context via a Stop hook.
+    #[serde(default = "default_true")]
+    #[setting(label = "Auto-capture findings", widget = "toggle")]
+    pub capture: bool,
+
+    /// Model used to extract findings for auto-capture.
+    #[serde(default = "default_capture_model")]
+    #[setting(label = "Capture model", widget = "text")]
+    pub capture_model: String,
 }
 
 impl Default for CuratorConfig {
@@ -1653,6 +1663,8 @@ impl Default for CuratorConfig {
             auto: true,
             interval_minutes: default_curator_interval_minutes(),
             agent: None,
+            capture: true,
+            capture_model: default_capture_model(),
         }
     }
 }
@@ -1667,6 +1679,10 @@ impl CuratorConfig {
 
 fn default_curator_interval_minutes() -> u64 {
     60
+}
+
+fn default_capture_model() -> String {
+    "sonnet".to_string()
 }
 
 /// Serde default for `Config.default_profile`. Empty means "not explicitly

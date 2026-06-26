@@ -273,11 +273,15 @@ context_lines = 3
 
 The group-context curator (L2) periodically rewrites a group's append-only `context.md` into a deduplicated, hierarchical document plus an outward-facing `summary.md`, running the configured agent once in one-shot mode. Auto-curation is change-gated: a group is only curated when its context has grown since the last run and at least `interval_minutes` have elapsed. You can also curate the selected group on demand with the `a` key (`Shift+A` in strict-hotkey mode).
 
+Each grouped claude session also gets a finding-capture Stop hook auto-installed into its worktree (`.claude/settings.local.json`). After a substantial turn the hook extracts the one durable finding from the agent's final message and records it with `aoe context add`, so the group context fills in without anyone being asked. The hook is best-effort, recursion-safe, and skips trivial turns; set `capture = false` to remove it on the next attach.
+
 ```toml
 [curator]
 auto = true
 interval_minutes = 60
 # agent = "claude"
+capture = true
+capture_model = "sonnet"
 ```
 
 | Option | Default | Description |
@@ -285,6 +289,8 @@ interval_minutes = 60
 | `auto` | `true` | Automatically curate group context |
 | `interval_minutes` | `60` | Minutes between automatic curations |
 | `agent` | (claude) | Agent CLI to run as the curator (default claude) |
+| `capture` | `true` | Auto-capture each agent's findings into the group context via a Stop hook |
+| `capture_model` | `sonnet` | Model used to extract findings for auto-capture |
 
 ## Updates
 
