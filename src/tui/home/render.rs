@@ -1296,15 +1296,15 @@ impl HomeView {
         };
 
         // Pinned PM rows read as a distinct role, not a normal chat: a fixed
-        // badge glyph and `PM ` prefix in the accent color, overriding the
-        // status-derived icon/style the per-mode arms computed above.
+        // badge glyph and accent color, overriding the status-derived icon/style
+        // the per-mode arms computed above. The title already carries the
+        // `PM - <group>` text, so no extra prefix here.
         if let Item::Session { id, .. } = item {
             if self
                 .get_instance(id)
                 .is_some_and(|inst| inst.is_project_manager())
             {
                 icon = ICON_PINNED;
-                text = Cow::Owned(format!("PM {}", text));
                 style = Style::default().fg(theme.accent).bold();
             }
         }
