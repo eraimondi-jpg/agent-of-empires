@@ -74,6 +74,14 @@ pub async fn run(profile: &str, args: RemoveArgs) -> Result<()> {
     let inst = super::resolve_session(&args.identifier, &instances)
         .map_err(|e| anyhow::anyhow!("{} in profile '{}'", e, storage.profile()))?
         .clone();
+
+    if inst.is_project_manager() {
+        anyhow::bail!(
+            "the Project Manager is the group's permanent agent and cannot be removed; \
+             delete the group to remove it"
+        );
+    }
+
     let removed_id = inst.id.clone();
     let removed_title = inst.title.clone();
 

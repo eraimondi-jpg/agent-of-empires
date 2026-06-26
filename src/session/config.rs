@@ -68,6 +68,9 @@ pub struct Config {
     pub curator: CuratorConfig,
 
     #[serde(default)]
+    pub project_manager: ProjectManagerConfig,
+
+    #[serde(default)]
     pub logging: LoggingConfig,
 
     /// Environment variables injected into the host command line for every
@@ -1681,6 +1684,24 @@ impl CuratorConfig {
     /// `claude` default.
     pub fn effective_agent(&self) -> &str {
         self.agent.as_deref().unwrap_or("claude")
+    }
+}
+
+/// Per-group Project Manager configuration. The PM is a single permanent agent
+/// auto-created (dormant) on group creation; this is the kill switch for the
+/// whole feature.
+#[derive(Debug, Clone, Serialize, Deserialize, SettingsSection)]
+#[setting_section(name = "project_manager", category = "Session")]
+pub struct ProjectManagerConfig {
+    /// Give each group a permanent Project Manager agent.
+    #[serde(default = "default_true")]
+    #[setting(label = "Per-group Project Manager", widget = "toggle")]
+    pub enabled: bool,
+}
+
+impl Default for ProjectManagerConfig {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 

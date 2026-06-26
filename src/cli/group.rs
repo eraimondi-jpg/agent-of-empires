@@ -145,6 +145,10 @@ async fn create_group(profile: &str, args: GroupCreateArgs) -> Result<()> {
         Ok(())
     })?;
 
+    if let Err(e) = crate::session::pm_agent::ensure_pm_session(profile, &group_path) {
+        tracing::warn!(target: "session.pm", "PM auto-create failed for group '{group_path}': {e}");
+    }
+
     println!("✓ Created group: {}", group_path);
     Ok(())
 }
@@ -154,37 +158,65 @@ async fn delete_group(profile: &str, args: GroupDeleteArgs) -> Result<()> {
     let name = args.name.trim().to_string();
     let force = args.force;
 
+    let prefix = format!("{}/", name);
+    let in_group = |g: &str| -> bool { g == name || g.starts_with(&prefix) };
+
+    // The group is going away, so its PM is removed along with it (bypassing the
+    // per-session delete refusal). Capture the scratch dirs to clean up after the
+    // locked update returns.
+    let mut pm_scratch_dirs: Vec<std::path::PathBuf> = Vec::new();
+
     let session_count = storage.update(|instances, groups| {
         let mut group_tree = GroupTree::new_with_groups(instances, groups);
         if !group_tree.group_exists(&name) {
             bail!("Group not found: {}", name);
         }
 
-        let session_count = instances
+        // Worker count excludes the PM: the PM is the group's own agent, not a
+        // user session, so it must not gate the --force prompt.
+        let worker_count = instances
             .iter()
-            .filter(|i| i.group_path == name || i.group_path.starts_with(&format!("{}/", name)))
+            .filter(|i| in_group(&i.group_path) && !i.is_project_manager())
             .count();
 
-        if session_count > 0 {
+        if worker_count > 0 {
             if !force {
                 bail!(
                     "Group '{}' contains {} sessions. Use --force to move them to default group.",
                     name,
-                    session_count
+                    worker_count
                 );
             }
 
             for inst in instances.iter_mut() {
-                if inst.group_path == name || inst.group_path.starts_with(&format!("{}/", name)) {
+                if in_group(&inst.group_path) && !inst.is_project_manager() {
                     inst.group_path = String::new();
                 }
             }
         }
 
+        for pm in instances
+            .iter()
+            .filter(|i| in_group(&i.group_path) && i.is_project_manager())
+        {
+            if pm.scratch {
+                pm_scratch_dirs.push(std::path::PathBuf::from(&pm.project_path));
+            }
+        }
+        instances.retain(|i| !(in_group(&i.group_path) && i.is_project_manager()));
+
         group_tree.delete_group(&name);
         *groups = group_tree.get_all_groups();
-        Ok(session_count)
+        Ok(worker_count)
     })?;
+
+    for dir in &pm_scratch_dirs {
+        if crate::session::scratch::is_scratch_path(dir) {
+            if let Err(e) = std::fs::remove_dir_all(dir) {
+                tracing::warn!(target: "session.pm", "PM scratch cleanup failed for {}: {e}", dir.display());
+            }
+        }
+    }
 
     println!("✓ Deleted group: {}", name);
     if force && session_count > 0 {

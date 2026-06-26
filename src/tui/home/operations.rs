@@ -280,12 +280,26 @@ impl HomeView {
 
         self.add_instance(instance.clone());
         self.rebuild_group_trees();
+        let mut new_group: Option<String> = None;
         if !instance.group_path.is_empty() {
             if let Some(tree) = self.group_trees.get_mut(&target_profile) {
+                if !tree.group_exists(&instance.group_path) {
+                    new_group = Some(instance.group_path.clone());
+                }
                 tree.create_group(&instance.group_path);
             }
         }
         self.save()?;
+
+        // Auto-create the group's permanent PM only when the group is newly
+        // created here. Best-effort; never fails the session create.
+        if let Some(group_path) = new_group {
+            if let Err(e) =
+                crate::session::pm_agent::ensure_pm_session(&target_profile, &group_path)
+            {
+                tracing::warn!(target: "session.pm", "PM auto-create failed for group '{group_path}': {e}");
+            }
+        }
 
         self.reload()?;
         // Same rationale as the async branch in apply_creation_results:
@@ -535,6 +549,17 @@ impl HomeView {
                 return Ok(());
             }
 
+            if self
+                .get_instance(&id)
+                .is_some_and(|i| i.is_project_manager())
+            {
+                self.info_dialog = Some(InfoDialog::new(
+                    "Cannot remove Project Manager",
+                    "the Project Manager is the group's permanent agent and cannot be removed; delete the group to remove it",
+                ));
+                return Ok(());
+            }
+
             self.set_instance_status(&id, Status::Deleting);
 
             if let Some(inst) = self.get_instance(&id) {
@@ -558,20 +583,46 @@ impl HomeView {
         if let Some(group_path) = self.selected_group.take() {
             let owning_profile = self.selected_group_profile.take();
             let prefix = format!("{}/", group_path);
+            let in_group = |i: &crate::session::Instance| -> bool {
+                (i.group_path == group_path || i.group_path.starts_with(&prefix))
+                    && owning_profile
+                        .as_ref()
+                        .is_none_or(|p| p == &i.source_profile)
+            };
+            // The group is going away, so its PM goes with it (record + scratch
+            // dir), bypassing the per-session delete refusal. Workers move to the
+            // default group as before.
+            let pm_scratch_dirs: Vec<std::path::PathBuf> = self
+                .instances
+                .iter()
+                .filter(|i| in_group(i) && i.is_project_manager() && i.scratch)
+                .map(|i| std::path::PathBuf::from(&i.project_path))
+                .collect();
+            let pm_ids: Vec<String> = self
+                .instances
+                .iter()
+                .filter(|i| in_group(i) && i.is_project_manager())
+                .map(|i| i.id.clone())
+                .collect();
             let ids_to_clear: Vec<String> = self
                 .instances
                 .iter()
-                .filter(|i| {
-                    (i.group_path == group_path || i.group_path.starts_with(&prefix))
-                        && owning_profile
-                            .as_ref()
-                            .is_none_or(|p| p == &i.source_profile)
-                })
+                .filter(|i| in_group(i) && !i.is_project_manager())
                 .map(|i| i.id.clone())
                 .collect();
             self.bulk_apply_user_action(&ids_to_clear, |inst| {
                 inst.group_path = String::new();
             })?;
+            for pm_id in &pm_ids {
+                self.remove_instance(pm_id);
+            }
+            for dir in &pm_scratch_dirs {
+                if crate::session::scratch::is_scratch_path(dir) {
+                    if let Err(e) = std::fs::remove_dir_all(dir) {
+                        tracing::warn!(target: "session.pm", "PM scratch cleanup failed for {}: {e}", dir.display());
+                    }
+                }
+            }
 
             self.rebuild_group_trees();
             if let Some(profile) = &owning_profile {

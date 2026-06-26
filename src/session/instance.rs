@@ -530,6 +530,13 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub scratch: bool,
 
+    /// Marks this session as its group's permanent Project Manager: a single,
+    /// non-removable agent created dormant on group creation. The delete path
+    /// refuses it directly; only group deletion removes it. See
+    /// `src/session/pm_agent.rs`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_project_manager: bool,
+
     // Git worktree integration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_info: Option<WorktreeInfo>,
@@ -939,6 +946,7 @@ impl Instance {
             pre_trash_project_path: None,
             plugin_meta: std::collections::BTreeMap::new(),
             scratch: false,
+            is_project_manager: false,
             worktree_info: None,
             workspace_info: None,
             sandbox_info: None,
@@ -1013,6 +1021,10 @@ impl Instance {
     /// decide whether to set `delete_worktree`; gating on `worktree_info`
     /// alone silently leaks the workspace directory (#2363). Mirrors the TUI
     /// group-delete predicate so every surface agrees.
+    pub fn is_project_manager(&self) -> bool {
+        self.is_project_manager
+    }
+
     pub fn has_managed_worktree_or_workspace(&self) -> bool {
         self.worktree_info
             .as_ref()

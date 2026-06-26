@@ -296,6 +296,19 @@ ask = true
 | `capture_model` | `sonnet` | Model used to extract findings for auto-capture |
 | `ask` | `true` | Let `aoe curator run` ask idle in-group agents clarifying questions via agent-chat |
 
+## Project Manager
+
+Each group gets one permanent Project Manager (PM) agent, created dormant when the group is first created. The PM is a single, non-removable session that owns the group's shared memory, acts as its `agent-chat` endpoint, and, on a directive from you, decomposes the work and drives the group's other agents. The PM is created with an instruction file and a `Bash(aoe:*)` / `Bash(agent-chat:*)` permissions allowlist so it can act without per-call approval; deleting the PM directly is refused, and it is removed only when its group is deleted. Set `enabled = false` to turn the feature off so no PM is created for new groups.
+
+```toml
+[project_manager]
+enabled = true
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enabled` | `true` | Give each group a permanent Project Manager agent |
+
 ## Updates
 
 ```toml

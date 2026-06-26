@@ -3456,14 +3456,28 @@ impl HomeView {
 
                 self.add_instance(instance.clone());
                 self.rebuild_group_trees();
+                let mut new_group: Option<String> = None;
                 if !instance.group_path.is_empty() {
                     if let Some(tree) = self.group_trees.get_mut(&target_profile) {
+                        if !tree.group_exists(&instance.group_path) {
+                            new_group = Some(instance.group_path.clone());
+                        }
                         tree.create_group(&instance.group_path);
                     }
                 }
 
                 if let Err(e) = self.save() {
                     tracing::error!(target: "tui.home", "Failed to save after creation: {}", e);
+                }
+
+                // Auto-create the group's permanent PM only for a newly-created
+                // group. Best-effort; never fails the session create.
+                if let Some(group_path) = new_group {
+                    if let Err(e) =
+                        crate::session::pm_agent::ensure_pm_session(&target_profile, &group_path)
+                    {
+                        tracing::warn!(target: "session.pm", "PM auto-create failed for group '{group_path}': {e}");
+                    }
                 }
 
                 if on_launch_hooks_ran {
