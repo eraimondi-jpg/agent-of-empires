@@ -55,9 +55,9 @@ const ASKS_END: &str = "===AOE_ASKS_END===";
 /// Hard cap on clarifying questions per manual curate run.
 const MAX_ASKS: usize = 2;
 
-/// How long each `agent-chat ask` may block before it is treated as a timeout
-/// (empty stdout) and skipped.
-const ASK_TIMEOUT_SECS: u64 = 90;
+/// How long each `agent-chat ask` may block before it is treated as no answer
+/// and skipped.
+const ASK_TIMEOUT_SECS: u64 = 60;
 
 /// Outcome of a curate attempt, surfaced to the CLI and auto-trigger callers.
 pub enum CurateOutcome {
@@ -462,23 +462,19 @@ fn agent_chat_identity(group_path: &str) -> String {
     format!("curator-{sanitized}:{group_path} curator")
 }
 
-/// Strip a leading `--- reply from ... ---` header line from `agent-chat`'s
-/// stdout and return the remaining answer body, trimmed. Empty stdout means a
-/// timeout (the recipient never answered) and yields `None`.
-fn answer_from_reply(stdout: &str) -> Option<String> {
-    let trimmed = stdout.trim();
-    if trimmed.is_empty() {
+/// Parse `agent-chat ask --json` stdout. Returns the reply text only when the
+/// status is "answered"; "pending"/"skipped"/unparseable yield `None` (no answer
+/// this run). "skipped" means a stopped recipient was not revived.
+fn parse_ask_json(stdout: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    if v.get("status").and_then(|s| s.as_str()) != Some("answered") {
         return None;
     }
-    let body = match trimmed.split_once('\n') {
-        Some((first, rest)) if first.trim_start().starts_with("--- reply from") => rest,
-        _ => trimmed,
-    };
-    let body = body.trim();
-    if body.is_empty() {
+    let reply = v.get("reply").and_then(|r| r.as_str())?.trim();
+    if reply.is_empty() {
         None
     } else {
-        Some(body.to_string())
+        Some(reply.to_string())
     }
 }
 
@@ -518,13 +514,12 @@ pub async fn run_curator_asks(
             "ask".to_string(),
             id,
             question.clone(),
+            "--json".to_string(),
+            "--no-revive".to_string(),
             "--timeout".to_string(),
             ASK_TIMEOUT_SECS.to_string(),
         ];
-        let Some(stdout) = run_agent_chat(&argv, &identity).await else {
-            continue;
-        };
-        if let Some(answer) = answer_from_reply(&stdout) {
+        if let Some(answer) = run_agent_chat(&argv, &identity).await {
             answered.push((title, question, answer));
         }
     }
@@ -539,10 +534,10 @@ fn which_agent_chat() -> Option<std::path::PathBuf> {
         .find(|cand| cand.is_file())
 }
 
-/// Run `agent-chat` with `AGENT_CHAT_ID` set, capturing stdout. `None` on spawn
-/// error, non-zero exit (e.g. unknown recipient), or io error; the child is
-/// killed on drop. A timeout is reported by the tool as empty stdout, exit 0,
-/// so it returns `Some("")` and the caller treats it as no answer.
+/// Run `agent-chat ask --json` with `AGENT_CHAT_ID` set and return the reply
+/// text when the recipient answered, else `None` (timeout, skipped, bad
+/// recipient, or spawn/io error). Branches on the documented exit codes; the
+/// child is killed on drop.
 async fn run_agent_chat(argv: &[String], identity: &str) -> Option<String> {
     use tokio::process::Command;
     let mut cmd = Command::new(&argv[0]);
@@ -559,12 +554,20 @@ async fn run_agent_chat(argv: &[String], identity: &str) -> Option<String> {
             return None;
         }
     };
+    // Exit codes (agent-chat --json): 0 = answered, 3 = no answer (pending or
+    // skipped), 1 = bad recipient. Branch on the code; never sniff stdout.
     match child.wait_with_output().await {
-        Ok(out) if out.status.success() => Some(String::from_utf8_lossy(&out.stdout).into_owned()),
-        Ok(out) => {
-            tracing::debug!(target: "curator", code = ?out.status.code(), "agent-chat exited non-zero");
-            None
-        }
+        Ok(out) => match out.status.code() {
+            Some(0) => parse_ask_json(&String::from_utf8_lossy(&out.stdout)),
+            Some(1) => {
+                tracing::debug!(target: "curator", "agent-chat: unknown recipient");
+                None
+            }
+            other => {
+                tracing::debug!(target: "curator", code = ?other, "agent-chat: no answer");
+                None
+            }
+        },
         Err(e) => {
             tracing::debug!(target: "curator", "agent-chat io error: {e}");
             None
@@ -985,21 +988,14 @@ mod tests {
     }
 
     #[test]
-    fn answer_from_reply_strips_header_and_handles_timeout() {
-        // Empty stdout (timeout) -> no answer.
-        assert!(answer_from_reply("").is_none());
-        assert!(answer_from_reply("   \n").is_none());
-        // Leading reply header is stripped; the body remains.
-        let with_header = "--- reply from plotter ---\nuse SI units.\nsecond line";
-        assert_eq!(
-            answer_from_reply(with_header),
-            Some("use SI units.\nsecond line".to_string())
-        );
-        // No header: the whole trimmed body is the answer.
-        assert_eq!(
-            answer_from_reply("just an answer"),
-            Some("just an answer".to_string())
-        );
+    fn parse_ask_json_returns_reply_only_when_answered() {
+        let answered = r#"{"status":"answered","msg_id":"m","reply":"use SI units."}"#;
+        assert_eq!(parse_ask_json(answered), Some("use SI units.".to_string()));
+        // pending / skipped / garbage -> no answer.
+        assert!(parse_ask_json(r#"{"status":"pending","reply":null}"#).is_none());
+        assert!(parse_ask_json(r#"{"status":"skipped","reply":null}"#).is_none());
+        assert!(parse_ask_json("").is_none());
+        assert!(parse_ask_json("not json").is_none());
     }
 
     #[test]
