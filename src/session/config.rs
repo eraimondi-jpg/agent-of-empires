@@ -1655,6 +1655,12 @@ pub struct CuratorConfig {
     #[serde(default = "default_capture_model")]
     #[setting(label = "Capture model", widget = "text")]
     pub capture_model: String,
+
+    /// Let `aoe curator run` ask idle in-group agents clarifying questions via
+    /// agent-chat.
+    #[serde(default = "default_true")]
+    #[setting(label = "Ask idle agents on manual run", widget = "toggle")]
+    pub ask: bool,
 }
 
 impl Default for CuratorConfig {
@@ -1665,6 +1671,7 @@ impl Default for CuratorConfig {
             agent: None,
             capture: true,
             capture_model: default_capture_model(),
+            ask: true,
         }
     }
 }

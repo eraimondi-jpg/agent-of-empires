@@ -275,6 +275,8 @@ The group-context curator (L2) periodically rewrites a group's append-only `cont
 
 Each grouped claude session also gets a finding-capture Stop hook auto-installed into its worktree (`.claude/settings.local.json`). After a substantial turn the hook extracts the one durable finding from the agent's final message and records it with `aoe context add`, so the group context fills in without anyone being asked. The hook is best-effort, recursion-safe, and skips trivial turns; set `capture = false` to remove it on the next attach.
 
+When `ask` is on (the default), a manual `aoe curator run` may go one step further: after rewriting the context it can ask up to two idle in-group agents a clarifying question about genuinely unresolved items, using the external `agent-chat` CLI. Only idle members of the group are asked, one at a time, and each reply is appended back into `context.md` so the next curation folds it in. Auto-curation never asks; pass `--no-ask` to skip it for a single manual run.
+
 ```toml
 [curator]
 auto = true
@@ -282,6 +284,7 @@ interval_minutes = 60
 # agent = "claude"
 capture = true
 capture_model = "sonnet"
+ask = true
 ```
 
 | Option | Default | Description |
@@ -291,6 +294,7 @@ capture_model = "sonnet"
 | `agent` | (claude) | Agent CLI to run as the curator (default claude) |
 | `capture` | `true` | Auto-capture each agent's findings into the group context via a Stop hook |
 | `capture_model` | `sonnet` | Model used to extract findings for auto-capture |
+| `ask` | `true` | Let `aoe curator run` ask idle in-group agents clarifying questions via agent-chat |
 
 ## Updates
 

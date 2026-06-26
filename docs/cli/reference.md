@@ -699,6 +699,7 @@ Curate a group's context.md now (forces past the change-gate)
 
 * `-g`, `--group <GROUP>` — Group path; inferred from the current directory when omitted
 * `--agent <AGENT>` — One-shot agent to run the curate with (defaults to `claude`)
+* `--no-ask` — Do not ask idle in-group agents clarifying questions, overriding the `curator.ask` config for this run
 
 
 

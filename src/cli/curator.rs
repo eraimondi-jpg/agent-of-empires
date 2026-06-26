@@ -22,6 +22,10 @@ pub enum CuratorCommands {
         /// One-shot agent to run the curate with (defaults to `claude`)
         #[arg(long)]
         agent: Option<String>,
+        /// Do not ask idle in-group agents clarifying questions, overriding the
+        /// `curator.ask` config for this run.
+        #[arg(long)]
+        no_ask: bool,
     },
     /// Show a group's curator state and whether a curate is pending
     Status(GroupArg),
@@ -29,11 +33,18 @@ pub enum CuratorCommands {
 
 pub async fn run(profile: &str, command: CuratorCommands) -> Result<()> {
     match command {
-        CuratorCommands::Run { group, agent } => {
+        CuratorCommands::Run {
+            group,
+            agent,
+            no_ask,
+        } => {
             let group = resolve_group(profile, group.group)?;
             let tool = agent.unwrap_or_else(|| DEFAULT_TOOL.to_string());
+            let curator_config =
+                crate::session::profile_config::resolve_config_or_warn(profile).curator;
+            let ask = curator_config.ask && !no_ask;
             // A manual run forces past the change-gate: the user asked for it.
-            let outcome = curator::curate(profile, &group, &tool, true).await?;
+            let outcome = curator::curate(profile, &group, &tool, true, ask).await?;
             print_outcome(&group, &outcome);
             Ok(())
         }
@@ -49,9 +60,16 @@ fn print_outcome(group: &str, outcome: &CurateOutcome) {
         CurateOutcome::Curated {
             context_bytes,
             summary_bytes,
-        } => println!(
-            "Curated {group}: context {context_bytes} bytes, summary {summary_bytes} bytes"
-        ),
+            asked,
+            answered,
+        } => {
+            println!(
+                "Curated {group}: context {context_bytes} bytes, summary {summary_bytes} bytes"
+            );
+            if *asked > 0 {
+                println!("Asked {asked} idle in-group agent(s), {answered} answered");
+            }
+        }
         CurateOutcome::SkippedNoChange => println!("No changes since last run for {group}"),
         CurateOutcome::SkippedNoAgent(tool) => {
             println!("No one-shot-capable agent '{tool}' for {group}")

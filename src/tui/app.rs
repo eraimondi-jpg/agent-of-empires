@@ -2595,7 +2595,8 @@ impl App {
                 let agent = curator.effective_agent().to_string();
                 tokio::spawn(async move {
                     if let Err(e) =
-                        crate::session::curator::curate(&profile, &group, &agent, false).await
+                        crate::session::curator::curate(&profile, &group, &agent, false, false)
+                            .await
                     {
                         tracing::warn!(target: "curator", group = %group, "auto-curate failed: {e}");
                     }

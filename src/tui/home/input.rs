@@ -4122,7 +4122,11 @@ impl HomeView {
             .effective_agent()
             .to_string();
         tokio::spawn(async move {
-            if let Err(e) = crate::session::curator::curate(&profile, &group, &agent, true).await {
+            // The TUI `a` keybind forces a curate but never asks idle agents;
+            // asking is gated to the `aoe curator run` command path (GOAL 1).
+            if let Err(e) =
+                crate::session::curator::curate(&profile, &group, &agent, true, false).await
+            {
                 tracing::warn!(target: "curator", group = %group, "manual curate failed: {e}");
             }
         });
