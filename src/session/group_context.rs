@@ -529,6 +529,7 @@ pub fn attach(
     project_path: &str,
     tool: &str,
     session_id: &str,
+    is_pm: bool,
 ) -> Result<()> {
     if group_path.is_empty() {
         return Ok(());
@@ -586,8 +587,17 @@ pub fn attach(
     }
 
     // 5. Auto-capture Stop hook (claude only), reconciled from curator config.
+    // The PM is the curator, never a capture source: installing the hook would
+    // make its own turns append to context.md and perpetually re-trip the curate
+    // change-gate, so PMs get the hook removed instead of installed.
     if wiring::instruction_filename_for_tool(tool) == Some("CLAUDE.md") {
-        reconcile_capture_hook(profile, cwd);
+        if is_pm {
+            if let Err(e) = remove_capture_hook(cwd) {
+                tracing::warn!("group-context: PM capture-hook removal failed: {e}");
+            }
+        } else {
+            reconcile_capture_hook(profile, cwd);
+        }
     }
     Ok(())
 }
@@ -627,6 +637,7 @@ pub fn attach_for_instance(profile: &str, inst: &Instance) -> Result<()> {
         &inst.project_path,
         &inst.tool,
         &inst.id,
+        inst.is_project_manager(),
     )
 }
 
@@ -649,6 +660,7 @@ pub fn reconcile_all(instances: &[Instance]) {
             &inst.project_path,
             &inst.tool,
             &inst.id,
+            inst.is_project_manager(),
         );
     }
 }
@@ -787,7 +799,7 @@ mod attach_tests {
         std::fs::create_dir_all(work.join(".git").join("info")).unwrap();
         let work_s = work.to_str().unwrap();
 
-        super::attach("default", "g1", work_s, "claude", "sess1234").unwrap();
+        super::attach("default", "g1", work_s, "claude", "sess1234", false).unwrap();
         assert!(
             std::fs::symlink_metadata(work.join(wiring::CONTEXT_LINK_NAME))
                 .unwrap()
@@ -817,13 +829,61 @@ mod attach_tests {
         let real = work.join(wiring::CONTEXT_LINK_NAME);
         std::fs::write(&real, "i am a real file").unwrap();
 
-        super::attach("default", "g1", work.to_str().unwrap(), "claude", "s1").unwrap();
+        super::attach(
+            "default",
+            "g1",
+            work.to_str().unwrap(),
+            "claude",
+            "s1",
+            false,
+        )
+        .unwrap();
         // The real file is preserved, not replaced by a symlink.
         assert_eq!(std::fs::read_to_string(&real).unwrap(), "i am a real file");
         assert!(!std::fs::symlink_metadata(&real)
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    #[test]
+    #[serial]
+    fn attach_skips_capture_hook_for_pm() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path());
+        std::env::set_var("HOME", tmp.path());
+
+        // A worker session gets the capture Stop hook (default config: capture on).
+        let worker = tmp.path().join("worker");
+        std::fs::create_dir_all(worker.join(".git").join("info")).unwrap();
+        super::attach(
+            "default",
+            "g1",
+            worker.to_str().unwrap(),
+            "claude",
+            "w1",
+            false,
+        )
+        .unwrap();
+        let worker_settings =
+            std::fs::read_to_string(worker.join(".claude/settings.local.json")).unwrap();
+        let wv: serde_json::Value = serde_json::from_str(&worker_settings).unwrap();
+        assert!(
+            wv.get("hooks").and_then(|h| h.get("Stop")).is_some(),
+            "worker session should have the capture Stop hook"
+        );
+
+        // A PM session never gets it.
+        let pm = tmp.path().join("pm");
+        std::fs::create_dir_all(pm.join(".git").join("info")).unwrap();
+        super::attach("default", "g1", pm.to_str().unwrap(), "claude", "pm1", true).unwrap();
+        if let Ok(raw) = std::fs::read_to_string(pm.join(".claude/settings.local.json")) {
+            let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+            assert!(
+                v.get("hooks").and_then(|h| h.get("Stop")).is_none(),
+                "PM session must not get the capture Stop hook"
+            );
+        }
     }
 }
 
