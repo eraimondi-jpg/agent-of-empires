@@ -2591,6 +2591,17 @@ impl App {
             let due =
                 crate::session::curator::due_groups(&profile, self.home.instances(), interval, now);
             for group in due {
+                // A live group PM owns its memory: poke it to curate and skip
+                // the headless one-shot. Only when no live PM exists do we fall
+                // back to the one-shot (today's behavior).
+                if let Some(pm) =
+                    crate::session::pm_agent::live_pm_for_group(self.home.instances(), &group)
+                {
+                    if let Err(e) = crate::session::pm_agent::poke_pm_to_curate(pm) {
+                        tracing::warn!(target: "curator", group = %group, "PM curate poke failed: {e}");
+                    }
+                    continue;
+                }
                 let profile = profile.clone();
                 let agent = curator.effective_agent().to_string();
                 tokio::spawn(async move {

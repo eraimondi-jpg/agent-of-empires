@@ -84,6 +84,40 @@ pub fn activated_pms(instances: &[Instance]) -> Vec<&Instance> {
     instances.iter().filter(|i| should_revive_pm(i)).collect()
 }
 
+/// Whether a status means the session is launched and can accept input now: a
+/// running, waiting, or idle agent has a live pane. Dormant (`Stopped`),
+/// mid-lifecycle (`Starting`/`Creating`/`Deleting`), or failed (`Error`)
+/// sessions are not pokeable, and `Unknown` is treated as not-live so the
+/// caller falls back to the headless one-shot rather than poking a corpse.
+fn is_live_status(status: Status) -> bool {
+    matches!(status, Status::Running | Status::Waiting | Status::Idle)
+}
+
+/// The group's PM if it exists AND its pane is live (see [`is_live_status`]).
+/// A dormant `Status::Stopped` PM yields `None`, which routes periodic curation
+/// to the headless one-shot instead of poking an unlaunched agent.
+pub fn live_pm_for_group<'a>(instances: &'a [Instance], group_path: &str) -> Option<&'a Instance> {
+    pm_for_group(instances, group_path).filter(|pm| is_live_status(pm.status))
+}
+
+/// Curate instruction the live PM receives so it, not the headless one-shot,
+/// refreshes its group's memory on the periodic tick.
+const PM_CURATE_POKE: &str = "Curate now: refresh GROUP_CONTEXT.md and summary.md for your group, dedupe and keep durable facts, update the who-to-ask table, and surface OPEN items.";
+
+/// Send the live PM a fire-and-forget curate turn over its tmux pane, reusing
+/// the same internal send path as `aoe send` (no shelling out). Best-effort:
+/// the caller treats a missing/unstartable pane as "fall back to the headless
+/// one-shot", so we do not revive here, just deliver if the pane is up.
+pub fn poke_pm_to_curate(pm: &Instance) -> Result<()> {
+    let session = crate::tmux::Session::new(&pm.id, &pm.title)?;
+    if !session.exists() {
+        anyhow::bail!("PM pane is not running");
+    }
+    let delay = crate::agents::send_keys_enter_delay(&pm.tool);
+    session.send_keys_with_delay(PM_CURATE_POKE, delay)?;
+    Ok(())
+}
+
 /// Leaf name of a `/`-delimited group path, used for the PM's title.
 fn group_leaf(group_path: &str) -> &str {
     group_path.rsplit('/').next().unwrap_or(group_path)
@@ -313,6 +347,75 @@ mod tests {
         assert_eq!(revivable.len(), 1, "only the activated PM is revivable");
         assert_eq!(revivable[0].id, activated_pm.id);
         assert!(should_revive_pm(&activated_pm));
+    }
+
+    #[test]
+    fn live_pm_selector_requires_a_live_status() {
+        let mut worker = Instance::new("worker", "/tmp/w");
+        worker.group_path = "g".to_string();
+        worker.status = Status::Idle;
+
+        let mut dormant_pm = Instance::new("PM - g", "/tmp/pm");
+        dormant_pm.group_path = "g".to_string();
+        dormant_pm.is_project_manager = true;
+        dormant_pm.status = Status::Stopped;
+
+        // A dormant (Stopped) PM is not live: route to the headless one-shot.
+        let instances = vec![worker.clone(), dormant_pm.clone()];
+        assert!(live_pm_for_group(&instances, "g").is_none());
+
+        // Flip the PM to a live status and it is selected.
+        for live in [Status::Idle, Status::Running, Status::Waiting] {
+            let mut live_pm = dormant_pm.clone();
+            live_pm.status = live;
+            let instances = vec![worker.clone(), live_pm.clone()];
+            let picked = live_pm_for_group(&instances, "g").expect("live PM is selected");
+            assert_eq!(picked.id, live_pm.id);
+            assert!(is_live_status(live));
+        }
+
+        // Mid-lifecycle / failed statuses are not pokeable.
+        for not_live in [
+            Status::Starting,
+            Status::Creating,
+            Status::Error,
+            Status::Unknown,
+        ] {
+            let mut pm = dormant_pm.clone();
+            pm.status = not_live;
+            let instances = vec![pm];
+            assert!(
+                live_pm_for_group(&instances, "g").is_none(),
+                "{not_live:?} must not be live"
+            );
+            assert!(!is_live_status(not_live));
+        }
+    }
+
+    #[test]
+    fn live_pm_routes_to_poke_only_when_a_live_pm_exists() {
+        // Group with a live PM is routed to poke (Some); a group whose only PM
+        // is dormant falls through to the headless one-shot (None). This mirrors
+        // the branch both auto-curate tick sites take.
+        let mut live_pm = Instance::new("PM - has", "/tmp/p1");
+        live_pm.group_path = "has".to_string();
+        live_pm.is_project_manager = true;
+        live_pm.status = Status::Running;
+
+        let mut dormant_pm = Instance::new("PM - none", "/tmp/p2");
+        dormant_pm.group_path = "none".to_string();
+        dormant_pm.is_project_manager = true;
+        dormant_pm.status = Status::Stopped;
+
+        let instances = vec![live_pm, dormant_pm];
+        assert!(
+            live_pm_for_group(&instances, "has").is_some(),
+            "group with a live PM is poked"
+        );
+        assert!(
+            live_pm_for_group(&instances, "none").is_none(),
+            "group with only a dormant PM uses the headless one-shot"
+        );
     }
 
     #[test]
