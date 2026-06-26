@@ -251,6 +251,22 @@ pub fn commit_curation(
     Ok(())
 }
 
+/// Stamp the curator state as if curation just ran, without rewriting the files.
+/// Used when a live PM is poked to curate: the actual rewrite happens inside the
+/// agent's pane, so the auto-trigger must record `last_run_at`/`last_size` here
+/// or it would re-poke the PM on every poll tick (both due-gates stay open).
+pub fn mark_curation_started(profile: &str, group_path: &str) -> Result<()> {
+    let paths = ensure_files(profile, group_path)?;
+    let _guard = acquire_lock(&paths.lock)?;
+    let size = fs::metadata(&paths.context).map(|m| m.len()).unwrap_or(0);
+    let state = CuratorState {
+        last_run_at: chrono::Utc::now(),
+        last_size: size,
+    };
+    write_curator_state(&paths, &state)?;
+    Ok(())
+}
+
 /// Whether `context.md` changed since the last curation: true when no state
 /// exists yet, or the current byte size differs from the recorded `last_size`.
 /// Feeds the auto-trigger change-gate.
@@ -1136,5 +1152,20 @@ mod tests {
         };
         append_entry(&p, "g1", &a, "new note").unwrap();
         assert!(context_grew_since_last_curation(&p, "g1").unwrap());
+    }
+
+    #[test]
+    #[serial]
+    fn mark_curation_started_closes_grow_gate() {
+        let (_t, p) = with_temp_profile();
+        write_context(&p, "g1", "seed\n").unwrap();
+        assert!(context_grew_since_last_curation(&p, "g1").unwrap());
+
+        // Stamping without rewriting the files must close the change-gate like a
+        // real curation, so the auto-trigger stops re-poking a live PM each tick.
+        mark_curation_started(&p, "g1").unwrap();
+        assert!(!context_grew_since_last_curation(&p, "g1").unwrap());
+        let state = read_curator_state(&p, "g1").unwrap().unwrap();
+        assert_eq!(state.last_size, "seed\n".len() as u64);
     }
 }

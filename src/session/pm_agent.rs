@@ -115,6 +115,13 @@ pub fn poke_pm_to_curate(pm: &Instance) -> Result<()> {
     }
     let delay = crate::agents::send_keys_enter_delay(&pm.tool);
     session.send_keys_with_delay(PM_CURATE_POKE, delay)?;
+    // Stamp the curator state now so the auto-trigger does not re-poke this PM on
+    // every poll tick; the PM does the actual rewrite in its pane.
+    if let Err(e) =
+        group_context::mark_curation_started(&pm.effective_profile(), pm.group_path.trim())
+    {
+        tracing::warn!(target: "curator", group = %pm.group_path, "mark curation started failed: {e}");
+    }
     Ok(())
 }
 
