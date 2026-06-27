@@ -211,4 +211,144 @@ describe("plugin slot renderers", () => {
     expect(link.getAttribute("href")).toBe("https://github.com/o/nexus/pull/12");
     expect(container.querySelector("hr")).toBeTruthy();
   });
+
+  it("a row with a validated hex color tints via inline style; junk is ignored", () => {
+    const entry: PluginUiEntry = {
+      plugin_id: "acme.kit",
+      slot: "pane",
+      id: "gh",
+      session_id: "s1",
+      payload: {
+        blocks: [
+          { kind: "row", icon: "git-merge", label: "nexus", value: "MERGED #12", color: "#8957e5" },
+          { kind: "row", label: "other", value: "open", color: "javascript:alert(1)" },
+        ],
+      },
+    };
+    render(<PluginPaneBody entry={entry} />);
+    // jsdom normalizes the hex to rgb when it lands on the style attribute.
+    const merged = screen.getByText("MERGED #12");
+    expect(merged.style.color).toBe("rgb(137, 87, 229)");
+    // An invalid color leaves the value untinted (no inline color style).
+    const other = screen.getByText("open");
+    expect(other.style.color).toBe("");
+  });
+
+  it("a collapsible section renders a foldable details; collapsed sets the initial state", () => {
+    const entry: PluginUiEntry = {
+      plugin_id: "acme.kit",
+      slot: "pane",
+      id: "gh",
+      session_id: "s1",
+      payload: {
+        blocks: [
+          { kind: "section", title: "Checks: passing", collapsible: true, children: [{ kind: "note", text: "ci" }] },
+          {
+            kind: "section",
+            title: "Unresolved comments: 2",
+            collapsible: true,
+            collapsed: true,
+            children: [{ kind: "note", text: "cmt" }],
+          },
+          { kind: "section", title: "Plain", children: [{ kind: "note", text: "x" }] },
+        ],
+      },
+    };
+    const { container } = render(<PluginPaneBody entry={entry} />);
+    const details = container.querySelectorAll("details");
+    expect(details).toHaveLength(2);
+    // First (no `collapsed`) starts open; second (collapsed:true) starts closed.
+    expect((details[0] as HTMLDetailsElement).open).toBe(true);
+    expect((details[1] as HTMLDetailsElement).open).toBe(false);
+    // The title and children live inside the disclosure.
+    expect(screen.getByText("Checks: passing")).toBeTruthy();
+    expect(screen.getByText("cmt")).toBeTruthy();
+    // A section without the flag stays a plain <section>, not a <details>.
+    expect(container.querySelector("section")).toBeTruthy();
+  });
+
+  it("a collapsible section keeps the user's fold across a re-push (uncontrolled)", () => {
+    const entry: PluginUiEntry = {
+      plugin_id: "acme.kit",
+      slot: "pane",
+      id: "gh",
+      session_id: "s1",
+      payload: {
+        blocks: [{ kind: "section", title: "Checks", collapsible: true, children: [{ kind: "note", text: "ci" }] }],
+      },
+    };
+    const { container, rerender } = render(<PluginPaneBody entry={entry} />);
+    const details = container.querySelector("details") as HTMLDetailsElement;
+    expect(details.open).toBe(true);
+    // User folds it shut. The worker re-pushes the same pane state (a new object
+    // each poll); a controlled `open` would snap it back open.
+    details.open = false;
+    rerender(<PluginPaneBody entry={{ ...entry, payload: { ...entry.payload } }} />);
+    expect((container.querySelector("details") as HTMLDetailsElement).open).toBe(false);
+  });
+
+  it("a section title renders a tone-tinted icon for at-a-glance status", async () => {
+    const entry: PluginUiEntry = {
+      plugin_id: "acme.kit",
+      slot: "pane",
+      id: "gh",
+      session_id: "s1",
+      payload: {
+        blocks: [
+          {
+            kind: "section",
+            title: "Checks: passing",
+            collapsible: true,
+            collapsed: true,
+            icon: "circle-check",
+            tone: "success",
+            children: [{ kind: "note", text: "ci" }],
+          },
+        ],
+      },
+    };
+    const { container } = render(<PluginPaneBody entry={entry} />);
+    const summary = container.querySelector("summary")!;
+    // The success tone tints the title text, visible even when folded.
+    expect(summary.className).toContain("text-status-running");
+    // Both the chevron and the lazy-loaded status icon render as svgs.
+    await waitFor(() => expect(summary.querySelectorAll("svg")).toHaveLength(2));
+  });
+
+  it("comment blocks render read-only with author, location and resolved state", () => {
+    const entry: PluginUiEntry = {
+      plugin_id: "acme.kit",
+      slot: "pane",
+      id: "gh",
+      session_id: "s1",
+      payload: {
+        blocks: [
+          {
+            kind: "section",
+            title: "Unresolved comments: 1",
+            children: [
+              {
+                kind: "comment",
+                author: "alice",
+                body: "handle the nil case",
+                path: "src/foo.py",
+                line: 42,
+                href: "https://github.com/o/r/pull/1#c1",
+                resolved: false,
+              },
+            ],
+          },
+        ],
+      },
+    };
+    render(<PluginPaneBody entry={entry} />);
+    expect(screen.getByText("alice")).toBeTruthy();
+    expect(screen.getByText("handle the nil case")).toBeTruthy();
+    expect(screen.getByText("src/foo.py:42")).toBeTruthy();
+    expect(screen.getByText("unresolved")).toBeTruthy();
+    const link = screen.getByRole("link");
+    expect(link.getAttribute("href")).toBe("https://github.com/o/r/pull/1#c1");
+    // Read-only: no reply/resolve controls.
+    expect(screen.queryByRole("button")).toBeNull();
+  });
 });

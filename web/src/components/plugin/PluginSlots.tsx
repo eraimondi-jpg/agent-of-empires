@@ -6,10 +6,12 @@
 // sort-key and filter-facet are deferred (see #2366 follow-ups).
 
 import { createElement, useState } from "react";
+import { ChevronRight } from "lucide-react";
 
 import { invokePluginAction } from "../../lib/api";
 import { usePluginUiEntries } from "../../lib/pluginUiContext";
 import {
+  accentStyle,
   entryText,
   entryTone,
   globalEntries,
@@ -234,6 +236,9 @@ function BlockRow({ block }: { block: Record<string, unknown> }) {
   const sublabel = str(block, "sublabel");
   const iconComp = lucideIcon(str(block, "icon"));
   const tone = validTone(block.tone);
+  // A validated hex `color` overrides the tone color for the icon and value
+  // (e.g. a merged PR's purple, which no semantic tone names).
+  const accent = accentStyle(block.color);
   const safe = safeHref(str(block, "href"));
   if (!label && !value && !iconComp) return null;
   // Name the link from its text so an icon-only row is not announced unlabeled.
@@ -241,10 +246,18 @@ function BlockRow({ block }: { block: Record<string, unknown> }) {
   const inner = (
     <span className="flex min-w-0 items-center gap-2">
       {iconComp &&
-        createElement(iconComp, { className: `size-4 shrink-0 ${toneTextClass(tone)}`, "aria-hidden": true })}
+        createElement(iconComp, {
+          className: `size-4 shrink-0 ${accent ? "" : toneTextClass(tone)}`,
+          style: accent,
+          "aria-hidden": true,
+        })}
       <span className="min-w-0 truncate">
         {label && <span className="font-medium text-text-primary">{label}</span>}
-        {value && <span className="ml-1.5 text-text-secondary">{value}</span>}
+        {value && (
+          <span className="ml-1.5 text-text-secondary" style={accent}>
+            {value}
+          </span>
+        )}
         {sublabel && <span className="ml-1.5 text-[11px] text-text-dim">{sublabel}</span>}
       </span>
     </span>
@@ -297,6 +310,43 @@ function BlockAction({ block, pluginId }: { block: Record<string, unknown>; plug
   );
 }
 
+/** A read-only PR review comment: author, optional file:line, a wrapped body
+ *  excerpt, and an unresolved/resolved marker. Wrapped in a link when `href` is
+ *  a safe http(s) URL. There are no reply/resolve controls; this only surfaces
+ *  what is already on the PR. */
+function BlockComment({ block }: { block: Record<string, unknown> }) {
+  const author = str(block, "author");
+  const body = str(block, "body");
+  const path = str(block, "path");
+  const line = typeof block.line === "number" ? block.line : undefined;
+  const resolved = block.resolved === true;
+  const safe = safeHref(str(block, "href"));
+  if (!author && !body) return null;
+  const where = path ? `${path}${line ? `:${line}` : ""}` : undefined;
+  const inner = (
+    <>
+      <div className="flex items-center justify-between gap-2 text-text-secondary">
+        <span className="min-w-0 truncate font-medium">{author}</span>
+        <span className="flex shrink-0 items-center gap-1.5">
+          {where && <span className="font-mono text-[10px] text-text-dim truncate max-w-40">{where}</span>}
+          <span className={`text-[10px] ${resolved ? "text-status-running" : "text-status-waiting"}`}>
+            {resolved ? "resolved" : "unresolved"}
+          </span>
+        </span>
+      </div>
+      {body && <div className="mt-0.5 line-clamp-3 whitespace-pre-wrap text-text-primary">{body}</div>}
+    </>
+  );
+  const className = "block rounded bg-surface-700/30 p-2 text-xs";
+  return safe ? (
+    <a className={`${className} hover:bg-surface-700/50`} href={safe} target="_blank" rel="noopener noreferrer">
+      {inner}
+    </a>
+  ) : (
+    <div className={className}>{inner}</div>
+  );
+}
+
 /** Render one pane block. The block vocabulary is forward-compatible:
  *  an unknown `kind` (or a known kind missing its required field) renders
  *  nothing rather than throwing, so a newer plugin can push kinds an older host
@@ -309,6 +359,8 @@ function DetailBlock({ block, pluginId }: { block: Record<string, unknown>; plug
     }
     case "row":
       return <BlockRow block={block} />;
+    case "comment":
+      return <BlockComment block={block} />;
     case "note": {
       const text = str(block, "text");
       return text ? <p className={`text-xs ${toneTextClass(validTone(block.tone))}`}>{text}</p> : null;
@@ -320,12 +372,37 @@ function DetailBlock({ block, pluginId }: { block: Record<string, unknown>; plug
     case "section": {
       const title = str(block, "title");
       const children = Array.isArray(block.children) ? block.children.filter(isObject) : [];
+      const body = children.map((c, i) => <DetailBlock key={i} block={c} pluginId={pluginId} />);
+      // An optional tone-tinted icon on the title gives an at-a-glance status
+      // even when the section is folded (e.g. a green check vs a red x).
+      const tone = validTone(block.tone);
+      const iconComp = lucideIcon(str(block, "icon"));
+      const titleColor = iconComp || tone ? toneTextClass(tone) : "text-text-dim";
+      const titleClass = `text-[11px] font-semibold uppercase tracking-wide ${titleColor}`;
+      const titleInner = (
+        <>
+          {iconComp && createElement(iconComp, { className: "size-3 shrink-0", "aria-hidden": true })}
+          {title}
+        </>
+      );
+      // A `collapsible` section folds via a native <details>: keyboard-accessible
+      // and stateless, no JS toggle to track. `collapsed` sets the initial state;
+      // it stays open by default so existing panes look unchanged.
+      if (block.collapsible === true) {
+        return (
+          <details className="group flex flex-col gap-1" open={block.collapsed !== true}>
+            <summary className={`flex cursor-pointer list-none items-center gap-1 select-none ${titleClass}`}>
+              <ChevronRight className="size-3 shrink-0 transition-transform group-open:rotate-90" aria-hidden />
+              {titleInner}
+            </summary>
+            <div className="flex flex-col gap-1">{body}</div>
+          </details>
+        );
+      }
       return (
         <section className="flex flex-col gap-1">
-          {title && <div className="text-[11px] font-semibold uppercase tracking-wide text-text-dim">{title}</div>}
-          {children.map((c, i) => (
-            <DetailBlock key={i} block={c} pluginId={pluginId} />
-          ))}
+          {title && <div className={`flex items-center gap-1 ${titleClass}`}>{titleInner}</div>}
+          {body}
         </section>
       );
     }
