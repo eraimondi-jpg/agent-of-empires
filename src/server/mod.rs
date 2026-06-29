@@ -3199,6 +3199,14 @@ async fn auto_curate_due_groups(
             if !curator.auto {
                 continue;
             }
+            if !crate::session::curator::curation_allowed_now(
+                curator.active_from_hour,
+                curator.active_to_hour,
+                curator.skip_weekends,
+                chrono::Local::now(),
+            ) {
+                continue;
+            }
             let interval = std::time::Duration::from_secs(curator.interval_minutes.max(1) * 60);
             let agent = curator.effective_agent().to_string();
             for group in crate::session::curator::due_groups(&profile, &instances, interval, now) {

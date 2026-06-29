@@ -1664,6 +1664,35 @@ pub struct CuratorConfig {
     #[serde(default = "default_true")]
     #[setting(label = "Ask idle agents on manual run", widget = "toggle")]
     pub ask: bool,
+
+    /// Earliest local-time hour (0-23) at which auto-curation may run. With
+    /// `active_to_hour` this forms a daily window; outside it the change-gate
+    /// stays closed. Default 0 paired with `active_to_hour` 24 means all day.
+    #[serde(default)]
+    #[setting(
+        label = "Auto-curate from (local hour)",
+        widget = "number",
+        min = 0,
+        max = 23,
+        validate = "range:0:23"
+    )]
+    pub active_from_hour: u8,
+
+    /// Local-time hour (1-24, exclusive end) the auto-curation window runs until.
+    #[serde(default = "default_curator_active_to")]
+    #[setting(
+        label = "Auto-curate until (local hour)",
+        widget = "number",
+        min = 1,
+        max = 24,
+        validate = "range:1:24"
+    )]
+    pub active_to_hour: u8,
+
+    /// Skip auto-curation on Saturday and Sunday (local time).
+    #[serde(default)]
+    #[setting(label = "Skip auto-curation on weekends", widget = "toggle")]
+    pub skip_weekends: bool,
 }
 
 impl Default for CuratorConfig {
@@ -1675,6 +1704,9 @@ impl Default for CuratorConfig {
             capture: true,
             capture_model: default_capture_model(),
             ask: true,
+            active_from_hour: 0,
+            active_to_hour: default_curator_active_to(),
+            skip_weekends: false,
         }
     }
 }
@@ -1707,6 +1739,10 @@ impl Default for ProjectManagerConfig {
 
 fn default_curator_interval_minutes() -> u64 {
     60
+}
+
+fn default_curator_active_to() -> u8 {
+    24
 }
 
 fn default_capture_model() -> String {

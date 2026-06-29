@@ -2587,6 +2587,14 @@ impl App {
             if !curator.auto {
                 continue;
             }
+            if !crate::session::curator::curation_allowed_now(
+                curator.active_from_hour,
+                curator.active_to_hour,
+                curator.skip_weekends,
+                chrono::Local::now(),
+            ) {
+                continue;
+            }
             let interval = std::time::Duration::from_secs(curator.interval_minutes.max(1) * 60);
             let due =
                 crate::session::curator::due_groups(&profile, self.home.instances(), interval, now);

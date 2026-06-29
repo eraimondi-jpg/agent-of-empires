@@ -16,7 +16,7 @@
 use crate::agents;
 use crate::session::group_context;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Local, Timelike, Utc, Weekday};
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -159,6 +159,31 @@ pub fn due_groups(
         }
     }
     due
+}
+
+/// Whether auto-curation may run at `now` (local time) under the daily window
+/// and weekend rule. The window is `[from_hour, to_hour)` on a 24h clock; a
+/// `from > to` window wraps past midnight. The defaults (0, 24, weekends on)
+/// allow every hour of every day, preserving the pre-window behavior. This gates
+/// only the automatic trigger; a manual `aoe curator run` is never blocked.
+pub fn curation_allowed_now(
+    from_hour: u8,
+    to_hour: u8,
+    skip_weekends: bool,
+    now: DateTime<Local>,
+) -> bool {
+    if skip_weekends && matches!(now.weekday(), Weekday::Sat | Weekday::Sun) {
+        return false;
+    }
+    within_hour_window(from_hour, to_hour, now.hour() as u8)
+}
+
+fn within_hour_window(from: u8, to: u8, hour: u8) -> bool {
+    if from <= to {
+        hour >= from && hour < to
+    } else {
+        hour >= from || hour < to
+    }
 }
 
 /// Build the roster of members for a group from loaded instances: every
@@ -696,6 +721,42 @@ fn build_oneshot_argv(agent: &agents::AgentDef, prompt: &str) -> Option<Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn within_hour_window_handles_normal_and_wrap() {
+        // Normal daytime window 8..20.
+        assert!(within_hour_window(8, 20, 8));
+        assert!(within_hour_window(8, 20, 19));
+        assert!(!within_hour_window(8, 20, 20));
+        assert!(!within_hour_window(8, 20, 7));
+        assert!(!within_hour_window(8, 20, 23));
+        // All-day default 0..24.
+        assert!(within_hour_window(0, 24, 0));
+        assert!(within_hour_window(0, 24, 23));
+        // Overnight wrap-around window 20..8.
+        assert!(within_hour_window(20, 8, 22));
+        assert!(within_hour_window(20, 8, 3));
+        assert!(!within_hour_window(20, 8, 12));
+    }
+
+    #[test]
+    fn curation_allowed_respects_weekends_and_hours() {
+        use chrono::TimeZone;
+        // 2026-06-29 Monday, 2026-06-27 Saturday.
+        let mon_10 = Local.with_ymd_and_hms(2026, 6, 29, 10, 0, 0).unwrap();
+        let mon_21 = Local.with_ymd_and_hms(2026, 6, 29, 21, 0, 0).unwrap();
+        let sat_10 = Local.with_ymd_and_hms(2026, 6, 27, 10, 0, 0).unwrap();
+
+        // Window 8..20 with weekends skipped (the requested setting).
+        assert!(curation_allowed_now(8, 20, true, mon_10));
+        assert!(!curation_allowed_now(8, 20, true, mon_21));
+        assert!(!curation_allowed_now(8, 20, true, sat_10));
+        // Weekends allowed when the skip is off.
+        assert!(curation_allowed_now(8, 20, false, sat_10));
+        // Defaults (all day, no weekend skip) always allow.
+        assert!(curation_allowed_now(0, 24, false, mon_21));
+        assert!(curation_allowed_now(0, 24, false, sat_10));
+    }
 
     fn roster() -> Vec<RosterMember> {
         vec![
