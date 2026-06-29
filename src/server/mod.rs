@@ -3210,15 +3210,10 @@ async fn auto_curate_due_groups(
             let interval = std::time::Duration::from_secs(curator.interval_minutes.max(1) * 60);
             let agent = curator.effective_agent().to_string();
             for group in crate::session::curator::due_groups(&profile, &instances, interval, now) {
-                // A live group PM owns its memory: poke it (tmux send is
-                // blocking, so it belongs here) and skip the headless one-shot.
-                // Only queue a one-shot plan when no live PM exists.
-                if let Some(pm) = crate::session::pm_agent::live_pm_for_group(&instances, &group) {
-                    if let Err(e) = crate::session::pm_agent::poke_pm_to_curate(pm) {
-                        tracing::warn!(target: "curator", group = %group, "PM curate poke failed: {e}");
-                    }
-                    continue;
-                }
+                // Curation runs as a background one-shot agent (no visible chat),
+                // never as the group's PM. Stamp up front so a slow run is not
+                // re-queued on the next check before it commits.
+                let _ = crate::session::group_context::mark_curation_started(&profile, &group);
                 plans.push((profile.clone(), group, agent.clone()));
             }
         }
